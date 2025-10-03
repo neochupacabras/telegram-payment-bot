@@ -52,6 +52,7 @@ except (ValueError, TypeError):
     sys.exit(1)
 
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
+WEBHOOK_URL = f"{WEBHOOK_BASE_URL}/webhook/telegram"
 global_bot_app = None
 processed_payments = set()  # Cache para evitar processamento duplicado
 
@@ -164,7 +165,7 @@ def process_approved_payment(payment_id: str):
                         "⚠️ **Atenção:** Este link é de uso único e não pode ser compartilhado."
                     )
                     send_message_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                    message_payload = {"chat_id": user_id, "text": success_message}
+                    message_payload = {"chat_id": user_id, "text": success_message, "parse_mode": "HTML"}
                     msg_response = requests.post(send_message_url, json=message_payload)
 
                     if msg_response.status_code == 200:
@@ -179,13 +180,26 @@ def process_approved_payment(payment_id: str):
         else:
             logger.info(f"Pagamento {payment_id} não está aprovado ou sem external_reference. Status: {status}")
 
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         logger.error(f"Erro ao processar pagamento {payment_id}: {e}", exc_info=True)
 
 # --- ROTAS DO FLASK ---
 @app.route("/")
 def health_check():
     return "Bot is alive!", 200
+
+@app.route("/webhook/telegram", methods=['POST'])
+def telegram_webhook():
+    """Webhook para receber atualizações do Telegram"""
+    if global_bot_app is None:
+        return "Bot not initialized", 500
+
+    update = Update.de_json(request.get_json(force=True), global_bot_app.bot)
+    asyncio.run_coroutine_threadsafe(
+        global_bot_app.process_update(update),
+        global_bot_app._loop
+    )
+    return "OK", 200
 
 @app.route("/webhook/mercadopago", methods=['POST'])
 def mercadopago_webhook():
@@ -220,28 +234,41 @@ def mercadopago_webhook():
     return "OK", 200
 
 # --- INICIALIZAÇÃO DO BOT ---
-def run_bot_polling():
+async def setup_bot_webhook():
+    """Configura o webhook do Telegram"""
     global global_bot_app
-    logger.info("Iniciando a aplicação do bot na sua própria thread...")
+
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    global_bot_app = application
+
+    # Registra os handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    # Configura o webhook
+    await application.bot.set_webhook(url=WEBHOOK_URL)
+    logger.info(f"Webhook configurado para: {WEBHOOK_URL}")
+
+def initialize_bot():
+    """Inicializa o bot em uma thread separada"""
+    logger.info("Inicializando o bot com webhook...")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        global_bot_app = application
-        global_bot_app.loop = loop
-
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button_handler))
-
-        logger.info("Polling do bot iniciado com sucesso!")
-        application.run_polling(stop_signals=None, drop_pending_updates=True)
-
+        loop.run_until_complete(setup_bot_webhook())
+        logger.info("Bot inicializado com sucesso via webhook!")
     except Exception as e:
-        logger.critical(f"ERRO FATAL NA THREAD DO BOT: {e}", exc_info=True)
+        logger.critical(f"ERRO FATAL NA INICIALIZAÇÃO DO BOT: {e}", exc_info=True)
 
-# Inicia a thread do bot
-logger.info("Iniciando a thread do bot em modo de produção...")
-bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
-bot_thread.start()
+# Inicia o bot quando o aplicativo Flask iniciar
+@app.before_first_request
+def initialize():
+    """Inicializa o bot antes do primeiro request"""
+    threading.Thread(target=initialize_bot, daemon=True).start()
+
+if __name__ == "__main__":
+    # Para execução local, inicializa diretamente
+    initialize_bot()
+    app.run(host="0.0.0.0", port=10000, debug=False)
