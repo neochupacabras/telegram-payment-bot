@@ -16,6 +16,7 @@ from flask import Flask, request
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from datetime import datetime, timedelta
 
 # --- CONFIGURAÇÃO DE LOGGING ---
 logging.basicConfig(
@@ -124,17 +125,29 @@ def create_pix_payment(user_id: int, user_name: str) -> dict:
         return None
 
 async def send_access_link(user_id: int):
+    """Cria e envia o link de convite para o usuário, com data de expiração."""
     if not global_bot_app:
         logger.error("A aplicação do bot não está inicializada. Não é possível enviar o link.")
         return
     try:
         logger.info(f"Gerando link de convite para o usuário {user_id}...")
-        invite_link = await global_bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1)
+
+        # --- ALTERAÇÃO PRINCIPAL AQUI ---
+        # Define uma data de expiração para 15 minutos a partir de agora.
+        expire_date = datetime.now() + timedelta(minutes=15)
+
+        # Cria o link com o limite de 1 membro E a data de expiração.
+        invite_link = await global_bot_app.bot.create_chat_invite_link(
+            chat_id=GROUP_CHAT_ID,
+            member_limit=1,
+            expire_date=expire_date
+        )
+
         success_message = (
             "🎉 Pagamento confirmado com sucesso!\n\n"
             "Seja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n"
             f"{invite_link.invite_link}\n\n"
-            "⚠️ **Atenção:** Este link é de uso único e não pode ser compartilhado."
+            "⚠️ **Atenção:** Este link é de uso único e expira em 15 minutos. Não pode ser compartilhado."
         )
         await global_bot_app.bot.send_message(chat_id=user_id, text=success_message)
         logger.info(f"✅ Acesso concedido com sucesso para o usuário {user_id}")
