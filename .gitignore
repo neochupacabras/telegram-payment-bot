@@ -1,0 +1,8 @@
+# Arquivos de ambiente
+.env
+INICIAR EXECUÇÃO.bat
+bot_pagamento.py
+
+# Cache do Python
+__pycache__/
+*.pyc
