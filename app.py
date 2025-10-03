@@ -170,21 +170,21 @@ def run_bot_polling():
     global global_bot_app
     logger.info("Iniciando a aplicação do bot...")
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    global_bot_app = application
-    global_bot_app.loop = asyncio.get_event_loop()
+    try:
+        # AQUI O CÓDIGO TENTA INICIAR E PODE CRASHAR
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        global_bot_app = application
+        global_bot_app.loop = asyncio.get_event_loop()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("Iniciando o polling do bot em uma thread...")
-    application.run_polling()
+        logger.info("Polling do bot iniciado com sucesso!")
+        application.run_polling()
 
-# Inicia o bot em uma thread separada ASSIM que o Gunicorn carrega o arquivo
-logger.info("Iniciando a thread do bot em modo de produção...")
-bot_thread = threading.Thread(target=run_bot_polling)
-bot_thread.daemon = True
-bot_thread.start()
-
-# O bloco if __name__ == '__main__' foi removido para evitar confusão.
-# O Gunicorn vai servir a variável 'app' diretamente.
+    except Exception as e:
+        # SE CAIR AQUI, O ERRO SERÁ CLARAMENTE LOGADO
+        logger.critical(f"ERRO FATAL NA THREAD DO BOT: {e}", exc_info=True)
+        # Tenta enviar um aviso para o administrador (opcional)
+        # asyncio.run(send_admin_alert(f"O bot falhou ao iniciar polling: {e}"))
+        pass # A thread morre, mas o servidor Flask continua vivo
