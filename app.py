@@ -9,6 +9,7 @@ import io
 import threading
 import sys
 import asyncio
+import time
 
 from flask import Flask, request
 from dotenv import load_dotenv
@@ -120,20 +121,39 @@ def mercadopago_webhook():
     data = request.get_json(silent=True)
     if not data:
         return "Bad Request", 400
+
     logger.info(f"Webhook do MP recebido: {data}")
     action = data.get("action")
+
     if action == "payment.updated":
         payment_id = data.get("data", {}).get("id")
         if payment_id:
+            # --- INÍCIO DA CORREÇÃO CRUCIAL ---
+            # Espera até que a thread do bot tenha inicializado a variável global_bot_app
+            # Adicionamos um timeout de 10 segundos para segurança.
+            timeout = 10
+            start_time = time.time()
+            while global_bot_app is None or global_bot_app.loop is None:
+                if time.time() - start_time > timeout:
+                    logger.error("TIMEOUT: A aplicação do bot não inicializou a tempo.")
+                    return "Service Unavailable: Bot is starting", 503 # Informa ao MP para tentar de novo
+                time.sleep(0.5)
+            # --- FIM DA CORREÇÃO CRUCIAL ---
+
             payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
             headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
             response = requests.get(payment_details_url, headers=headers)
+
             if response.status_code == 200:
                 payment_info = response.json()
                 if payment_info.get("status") == "approved" and payment_info.get("external_reference"):
                     user_id = int(payment_info["external_reference"])
                     logger.info(f"Pagamento aprovado para o usuário {user_id}")
+                    # Agora é seguro chamar, pois sabemos que global_bot_app.loop existe.
                     asyncio.run_coroutine_threadsafe(grant_access(user_id), global_bot_app.loop)
+            else:
+                logger.error(f"Falha ao buscar detalhes do pagamento {payment_id}. Status: {response.status_code}")
+
     return "OK", 200
 
 # --- INICIALIZAÇÃO DO BOT (A PARTE CRÍTICA) ---
