@@ -154,7 +154,7 @@ def run_bot_polling():
         application.add_handler(CallbackQueryHandler(button_handler))
 
         logger.info("Polling do bot iniciado com sucesso!")
-        application.run_polling()
+        application.run_polling(stop_signals=None)
 
     except Exception as e:
         logger.critical(f"ERRO FATAL NA THREAD DO BOT: {e}", exc_info=True)
