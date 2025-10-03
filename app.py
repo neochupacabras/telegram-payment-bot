@@ -262,13 +262,16 @@ def initialize_bot():
     except Exception as e:
         logger.critical(f"ERRO FATAL NA INICIALIZAÇÃO DO BOT: {e}", exc_info=True)
 
-# Inicia o bot quando o aplicativo Flask iniciar
-@app.before_first_request
-def initialize():
-    """Inicializa o bot antes do primeiro request"""
-    threading.Thread(target=initialize_bot, daemon=True).start()
+# Inicializa o bot quando a aplicação iniciar
+def start_bot():
+    """Inicia o bot em background"""
+    logger.info("Iniciando thread do bot...")
+    bot_thread = threading.Thread(target=initialize_bot, daemon=True)
+    bot_thread.start()
+
+# Inicialização imediata para produção
+start_bot()
 
 if __name__ == "__main__":
-    # Para execução local, inicializa diretamente
-    initialize_bot()
+    # Para desenvolvimento local
     app.run(host="0.0.0.0", port=10000, debug=False)
