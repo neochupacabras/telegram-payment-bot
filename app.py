@@ -185,6 +185,7 @@ def run_bot_polling():
         logger.critical(f"ERRO FATAL NA THREAD DO BOT: {e}", exc_info=True)
 
 # O Gunicorn vai importar este arquivo e executar o que está no escopo global.
+# O Gunicorn vai importar este arquivo e executar o que está no escopo global.
 # Nós iniciamos a thread do bot aqui para garantir que ela sempre rode.
 logger.info("Iniciando a thread do bot em modo de produção...")
 bot_thread = threading.Thread(target=run_bot_polling)
