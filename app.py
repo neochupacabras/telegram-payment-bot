@@ -101,21 +101,15 @@ def create_pix_payment(user_id: int, user_name: str) -> dict:
         logger.error(f"Erro ao criar pagamento no Mercado Pago: {e}", exc_info=True)
         return None
 
-async def grant_access(user_id: int):
-    try:
-        link = await global_bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1)
-        success_message = ( "🎉 Pagamento confirmado com sucesso!\n\n" "Seja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n" f"{link.invite_link}\n\n" "⚠️ **Atenção:** Este link é de uso único e não pode ser compartilhado." )
-        await global_bot_app.bot.send_message(chat_id=user_id, text=success_message)
-        logger.info(f"Acesso concedido para o usuário {user_id}")
-    except Exception as e:
-        logger.error(f"Erro ao conceder acesso para o usuário {user_id}: {e}", exc_info=True)
-        await global_bot_app.bot.send_message(chat_id=user_id, text="Houve um problema ao gerar seu link de acesso. Por favor, entre em contato com o suporte.")
-
+# --- ROTAS DO FLASK ---
 # --- ROTAS DO FLASK ---
 @app.route("/")
 def health_check():
     return "Bot is alive!", 200
 
+# ######################################################################
+# SUBSTITUA A SUA FUNÇÃO DE WEBHOOK ANTIGA POR ESTA VERSÃO COMPLETA
+# ######################################################################
 @app.route("/webhook/mercadopago", methods=['POST'])
 def mercadopago_webhook():
     data = request.get_json(silent=True)
@@ -128,18 +122,6 @@ def mercadopago_webhook():
     if action == "payment.updated":
         payment_id = data.get("data", {}).get("id")
         if payment_id:
-            # --- INÍCIO DA CORREÇÃO CRUCIAL ---
-            # Espera até que a thread do bot tenha inicializado a variável global_bot_app
-            # Adicionamos um timeout de 10 segundos para segurança.
-            timeout = 10
-            start_time = time.time()
-            while global_bot_app is None or global_bot_app.loop is None:
-                if time.time() - start_time > timeout:
-                    logger.error("TIMEOUT: A aplicação do bot não inicializou a tempo.")
-                    return "Service Unavailable: Bot is starting", 503 # Informa ao MP para tentar de novo
-                time.sleep(0.5)
-            # --- FIM DA CORREÇÃO CRUCIAL ---
-
             payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
             headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
             response = requests.get(payment_details_url, headers=headers)
@@ -148,9 +130,32 @@ def mercadopago_webhook():
                 payment_info = response.json()
                 if payment_info.get("status") == "approved" and payment_info.get("external_reference"):
                     user_id = int(payment_info["external_reference"])
-                    logger.info(f"Pagamento aprovado para o usuário {user_id}")
-                    # Agora é seguro chamar, pois sabemos que global_bot_app.loop existe.
-                    asyncio.run_coroutine_threadsafe(grant_access(user_id), global_bot_app.loop)
+                    logger.info(f"Pagamento aprovado para o usuário {user_id}. Gerando link de convite diretamente...")
+
+                    # --- LÓGICA DE CONVITE INDEPENDENTE ---
+                    # 1. Criar o link de convite
+                    create_link_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink"
+                    link_payload = {"chat_id": GROUP_CHAT_ID, "member_limit": 1}
+                    link_response = requests.post(create_link_url, json=link_payload)
+
+                    if link_response.status_code == 200:
+                        invite_link = link_response.json().get('result', {}).get('invite_link')
+                        if invite_link:
+                            # 2. Enviar a mensagem de sucesso para o usuário
+                            success_message = (
+                                "🎉 Pagamento confirmado com sucesso!\n\n"
+                                "Seja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n"
+                                f"{invite_link}\n\n"
+                                "⚠️ **Atenção:** Este link é de uso único e não pode ser compartilhado."
+                            )
+                            send_message_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                            message_payload = {"chat_id": user_id, "text": success_message}
+                            requests.post(send_message_url, json=message_payload)
+                            logger.info(f"Acesso concedido com sucesso para o usuário {user_id}")
+                        else:
+                            logger.error("Falha ao extrair o link de convite da resposta da API do Telegram.")
+                    else:
+                        logger.error(f"Erro ao criar link de convite via API. Status: {link_response.status_code}, Resposta: {link_response.text}")
             else:
                 logger.error(f"Falha ao buscar detalhes do pagamento {payment_id}. Status: {response.status_code}")
 
