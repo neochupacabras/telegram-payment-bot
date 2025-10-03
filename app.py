@@ -124,9 +124,43 @@ def create_pix_payment(user_id: int, user_name: str) -> dict:
         logger.error(f"Erro ao criar pagamento no Mercado Pago: {e}", exc_info=True)
         return None
 
+# --- ALTERAÇÃO 1: Criar uma função assíncrona para enviar o link ---
+# Esta função será executada de forma segura na thread do bot.
+async def send_access_link(user_id: int):
+    """Cria e envia o link de convite para o usuário."""
+    if not global_bot_app:
+        logger.error("A aplicação do bot não está inicializada. Não é possível enviar o link.")
+        return
+
+    try:
+        logger.info(f"Gerando link de convite para o usuário {user_id}...")
+        # Usando os métodos da biblioteca `python-telegram-bot`
+        invite_link = await global_bot_app.bot.create_chat_invite_link(
+            chat_id=GROUP_CHAT_ID,
+            member_limit=1
+        )
+
+        success_message = (
+            "🎉 Pagamento confirmado com sucesso!\n\n"
+            "Seja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n"
+            f"{invite_link.invite_link}\n\n"
+            "⚠️ **Atenção:** Este link é de uso único e não pode ser compartilhado."
+        )
+
+        # Usando os métodos da biblioteca `python-telegram-bot`
+        await global_bot_app.bot.send_message(
+            chat_id=user_id,
+            text=success_message
+        )
+        logger.info(f"✅ Acesso concedido com sucesso para o usuário {user_id}")
+
+    except Exception as e:
+        logger.error(f"Falha ao enviar link de acesso para o usuário {user_id}: {e}", exc_info=True)
+
+
+# --- ALTERAÇÃO 2: Modificar a função de processamento de pagamento ---
 def process_approved_payment(payment_id: str):
-    """Processa um pagamento aprovado e envia o link de acesso"""
-    # Evita processamento duplicado
+    """Processa um pagamento aprovado e agenda o envio do link de acesso."""
     if payment_id in processed_payments:
         logger.info(f"Pagamento {payment_id} já foi processado anteriormente.")
         return
@@ -146,41 +180,27 @@ def process_approved_payment(payment_id: str):
 
         if status == "approved" and external_reference:
             user_id = int(external_reference)
-            logger.info(f"Pagamento aprovado para o usuário {user_id}. Gerando link de convite...")
 
-            # Criar link de convite
-            create_link_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink"
-            link_payload = {"chat_id": GROUP_CHAT_ID, "member_limit": 1}
-            link_response = requests.post(create_link_url, json=link_payload)
+            # Adiciona o pagamento ao cache IMEDIATAMENTE para evitar reprocessamento
+            processed_payments.add(payment_id)
 
-            if link_response.status_code == 200:
-                invite_link = link_response.json().get('result', {}).get('invite_link')
-                if invite_link:
-                    # Enviar mensagem de sucesso
-                    success_message = (
-                        "🎉 Pagamento confirmado com sucesso!\n\n"
-                        "Seja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n"
-                        f"{invite_link}\n\n"
-                        "⚠️ **Atenção:** Este link é de uso único e não pode ser compartilhado."
-                    )
-                    send_message_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                    message_payload = {"chat_id": user_id, "text": success_message}
-                    msg_response = requests.post(send_message_url, json=message_payload)
-
-                    if msg_response.status_code == 200:
-                        processed_payments.add(payment_id)
-                        logger.info(f"✅ Acesso concedido com sucesso para o usuário {user_id}")
-                    else:
-                        logger.error(f"Erro ao enviar mensagem. Status: {msg_response.status_code}, Resposta: {msg_response.text}")
-                else:
-                    logger.error("Falha ao extrair o link de convite da resposta da API do Telegram.")
+            # Verificando se o bot e seu loop estão disponíveis
+            if global_bot_app and global_bot_app.loop:
+                # Esta é a parte mais importante: agendamos a execução da função
+                # assíncrona `send_access_link` na thread do bot.
+                asyncio.run_coroutine_threadsafe(
+                    send_access_link(user_id),
+                    global_bot_app.loop
+                )
             else:
-                logger.error(f"Erro ao criar link de convite. Status: {link_response.status_code}, Resposta: {link_response.text}")
+                logger.error("Bot ou seu loop de eventos não estão prontos. Não foi possível agendar o envio do link.")
+
         else:
             logger.info(f"Pagamento {payment_id} não está aprovado ou sem external_reference. Status: {status}")
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Erro ao processar pagamento {payment_id}: {e}", exc_info=True)
+
 
 # --- ROTAS DO FLASK ---
 @app.route("/")
@@ -204,7 +224,11 @@ def mercadopago_webhook():
 
     # Formato novo: topic + resource ou data.id
     if "topic" in data and data["topic"] == "payment":
-        payment_id = data.get("resource") or data.get("data", {}).get("id")
+        resource_url = data.get("resource", "")
+        if "payments/" in resource_url:
+            payment_id = resource_url.split("payments/")[-1]
+        else:
+            payment_id = data.get("data", {}).get("id")
 
     # Formato antigo: action + data.id
     elif "action" in data and "payment" in data["action"]:
@@ -224,11 +248,13 @@ def run_bot_polling():
     global global_bot_app
     logger.info("Iniciando a aplicação do bot na sua própria thread...")
 
+    # Cria e define um novo loop de eventos para esta thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        # Armazena a aplicação e seu loop na variável global
         global_bot_app = application
         global_bot_app.loop = loop
 
@@ -236,6 +262,7 @@ def run_bot_polling():
         application.add_handler(CallbackQueryHandler(button_handler))
 
         logger.info("Polling do bot iniciado com sucesso!")
+        # Roda o bot indefinidamente dentro deste loop
         application.run_polling(stop_signals=None, drop_pending_updates=True)
 
     except Exception as e:
