@@ -1,3 +1,5 @@
+# --- START OF FILE app.py ---
+
 # --- IMPORTS ---
 import os
 import logging
@@ -53,7 +55,7 @@ except (ValueError, TypeError):
 
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
 global_bot_app = None
-processed_payments = set()  # Cache para evitar processamento duplicado
+processed_payments = set()
 
 # --- INICIALIZAÇÃO DO FLASK ---
 app = Flask(__name__)
@@ -105,10 +107,7 @@ def create_pix_payment(user_id: int, user_name: str) -> dict:
         "transaction_amount": PAYMENT_AMOUNT,
         "description": f"Acesso ao grupo exclusivo para {user_name}",
         "payment_method_id": "pix",
-        "payer": {
-            "email": f"user_{user_id}@telegram.bot",
-            "first_name": user_name
-        },
+        "payer": { "email": f"user_{user_id}@telegram.bot", "first_name": user_name },
         "notification_url": NOTIFICATION_URL,
         "external_reference": str(user_id)
     }
@@ -124,83 +123,48 @@ def create_pix_payment(user_id: int, user_name: str) -> dict:
         logger.error(f"Erro ao criar pagamento no Mercado Pago: {e}", exc_info=True)
         return None
 
-# --- ALTERAÇÃO 1: Criar uma função assíncrona para enviar o link ---
-# Esta função será executada de forma segura na thread do bot.
 async def send_access_link(user_id: int):
-    """Cria e envia o link de convite para o usuário."""
     if not global_bot_app:
         logger.error("A aplicação do bot não está inicializada. Não é possível enviar o link.")
         return
-
     try:
         logger.info(f"Gerando link de convite para o usuário {user_id}...")
-        # Usando os métodos da biblioteca `python-telegram-bot`
-        invite_link = await global_bot_app.bot.create_chat_invite_link(
-            chat_id=GROUP_CHAT_ID,
-            member_limit=1
-        )
-
+        invite_link = await global_bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1)
         success_message = (
             "🎉 Pagamento confirmado com sucesso!\n\n"
             "Seja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n"
             f"{invite_link.invite_link}\n\n"
             "⚠️ **Atenção:** Este link é de uso único e não pode ser compartilhado."
         )
-
-        # Usando os métodos da biblioteca `python-telegram-bot`
-        await global_bot_app.bot.send_message(
-            chat_id=user_id,
-            text=success_message
-        )
+        await global_bot_app.bot.send_message(chat_id=user_id, text=success_message)
         logger.info(f"✅ Acesso concedido com sucesso para o usuário {user_id}")
-
     except Exception as e:
         logger.error(f"Falha ao enviar link de acesso para o usuário {user_id}: {e}", exc_info=True)
 
-
-# --- ALTERAÇÃO 2: Modificar a função de processamento de pagamento ---
 def process_approved_payment(payment_id: str):
-    """Processa um pagamento aprovado e agenda o envio do link de acesso."""
     if payment_id in processed_payments:
         logger.info(f"Pagamento {payment_id} já foi processado anteriormente.")
         return
-
     payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
     headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
-
     try:
         response = requests.get(payment_details_url, headers=headers)
         response.raise_for_status()
         payment_info = response.json()
-
         status = payment_info.get("status")
         external_reference = payment_info.get("external_reference")
-
         logger.info(f"Detalhes do pagamento {payment_id}: status={status}, external_reference={external_reference}")
-
         if status == "approved" and external_reference:
             user_id = int(external_reference)
-
-            # Adiciona o pagamento ao cache IMEDIATAMENTE para evitar reprocessamento
             processed_payments.add(payment_id)
-
-            # Verificando se o bot e seu loop estão disponíveis
             if global_bot_app and global_bot_app.loop:
-                # Esta é a parte mais importante: agendamos a execução da função
-                # assíncrona `send_access_link` na thread do bot.
-                asyncio.run_coroutine_threadsafe(
-                    send_access_link(user_id),
-                    global_bot_app.loop
-                )
+                asyncio.run_coroutine_threadsafe(send_access_link(user_id), global_bot_app.loop)
             else:
                 logger.error("Bot ou seu loop de eventos não estão prontos. Não foi possível agendar o envio do link.")
-
         else:
             logger.info(f"Pagamento {payment_id} não está aprovado ou sem external_reference. Status: {status}")
-
     except requests.exceptions.RequestException as e:
         logger.error(f"Erro ao processar pagamento {payment_id}: {e}", exc_info=True)
-
 
 # --- ROTAS DO FLASK ---
 @app.route("/")
@@ -209,34 +173,28 @@ def health_check():
 
 @app.route("/webhook/mercadopago", methods=['POST'])
 def mercadopago_webhook():
-    """
-    Webhook que processa notificações do Mercado Pago.
-    Suporta ambos os formatos: antigo (action) e novo (topic/resource).
-    """
     data = request.get_json(silent=True)
     if not data:
         logger.warning("Webhook recebido sem dados JSON")
         return "Bad Request", 400
 
     logger.info(f"Webhook do MP recebido: {data}")
-
     payment_id = None
 
-    # Formato novo: topic + resource ou data.id
-    if "topic" in data and data["topic"] == "payment":
-        resource_url = data.get("resource", "")
-        if "payments/" in resource_url:
-            payment_id = resource_url.split("payments/")[-1]
+    # --- LÓGICA DE EXTRAÇÃO DO ID CORRIGIDA ---
+    if data.get("topic") == "payment" or "payment" in data.get("action", ""):
+        # Formato novo (às vezes 'resource' é uma URL, às vezes só o ID)
+        resource = data.get("resource", "")
+        if "payments/" in resource:
+            payment_id = resource.split("payments/")[-1]
+        elif resource.isdigit(): # Checa se o 'resource' é apenas o ID numérico
+             payment_id = resource
         else:
+            # Formato antigo ou novo com 'data.id'
             payment_id = data.get("data", {}).get("id")
-
-    # Formato antigo: action + data.id
-    elif "action" in data and "payment" in data["action"]:
-        payment_id = data.get("data", {}).get("id")
 
     if payment_id:
         logger.info(f"Processando notificação do pagamento: {payment_id}")
-        # Processa o pagamento em uma thread separada para não bloquear o webhook
         threading.Thread(target=process_approved_payment, args=(str(payment_id),)).start()
     else:
         logger.warning(f"Webhook recebido sem payment_id identificável: {data}")
@@ -246,29 +204,20 @@ def mercadopago_webhook():
 # --- INICIALIZAÇÃO DO BOT ---
 def run_bot_polling():
     global global_bot_app
-    logger.info("Iniciando a aplicação do bot na sua própria thread...")
-
-    # Cria e define um novo loop de eventos para esta thread
+    logger.info("Configurando a aplicação do bot na sua própria thread...")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
     try:
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        # Armazena a aplicação e seu loop na variável global
         global_bot_app = application
         global_bot_app.loop = loop
-
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(button_handler))
-
-        logger.info("Polling do bot iniciado com sucesso!")
-        # Roda o bot indefinidamente dentro deste loop
+        logger.info("Aplicação do bot configurada. Iniciando polling...")
         application.run_polling(stop_signals=None, drop_pending_updates=True)
-
     except Exception as e:
         logger.critical(f"ERRO FATAL NA THREAD DO BOT: {e}", exc_info=True)
 
-# Inicia a thread do bot
-logger.info("Iniciando a thread do bot em modo de produção...")
-bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
-bot_thread.start()
+# --- REMOVIDO: O CÓDIGO QUE INICIAVA A THREAD FOI MOVIDO PARA gunicorn_config.py ---
+
+# --- END OF FILE app.py ---
