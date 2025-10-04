@@ -30,8 +30,9 @@ GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 PAYMENT_AMOUNT_STR = os.getenv("PAYMENT_AMOUNT")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 
-# (Validação de variáveis omitida para brevidade - mantenha a sua)
-# ...
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN, GROUP_CHAT_ID_STR, PAYMENT_AMOUNT_STR, WEBHOOK_BASE_URL]):
+    logger.critical("ERRO: Variáveis de ambiente essenciais não configuradas.")
+    sys.exit(1)
 
 try:
     GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
@@ -43,7 +44,6 @@ except (ValueError, TypeError):
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
 TELEGRAM_WEBHOOK_URL = f"{WEBHOOK_BASE_URL}/webhook/telegram"
 
-# Usando um set do asyncio para ser thread-safe, embora com 1 worker não seja estritamente necessário
 processed_payments = set()
 
 # --- INICIALIZAÇÃO DO BOT ---
@@ -61,7 +61,6 @@ app = Quart(__name__)
 
 # --- HANDLERS DO BOT ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (código idêntico)
     user = update.effective_user
     welcome_message = (f"Olá, {user.first_name}!\n\nBem-vindo(a) ao bot de acesso ao nosso grupo exclusivo.\n\nO valor do acesso único é de R$ {PAYMENT_AMOUNT:.2f}.\n\nPara entrar, clique no botão abaixo e realize o pagamento via PIX.")
     keyboard = [[InlineKeyboardButton("✅ Quero Entrar (Pagar com PIX)", callback_data='generate_payment')]]
@@ -69,7 +68,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (código idêntico)
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat_id
@@ -93,7 +91,6 @@ bot_app.add_handler(CallbackQueryHandler(button_handler))
 
 # --- FUNÇÕES DE PAGAMENTO ---
 async def create_pix_payment(user_id: int, user_name: str) -> dict:
-    # (código idêntico)
     url = "https://api.mercadopago.com/v1/payments"
     headers = { "Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}", "Content-Type": "application/json", "X-Idempotency-Key": str(uuid.uuid4()) }
     payload = {"transaction_amount": PAYMENT_AMOUNT, "description": f"Acesso ao grupo exclusivo para {user_name}", "payment_method_id": "pix", "payer": { "email": f"user_{user_id}@telegram.bot", "first_name": user_name }, "notification_url": NOTIFICATION_URL, "external_reference": str(user_id)}
@@ -113,11 +110,11 @@ async def send_access_link_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"[JOB][{payment_id}] Iniciando tarefa para enviar link ao usuário {user_id}.")
     try:
         logger.info(f"[JOB][{payment_id}] Gerando link de convite...")
-        expire_date = datetime.now() + timedelta(minutes=15)
+        expire_date = datetime.utcnow() + timedelta(hours=1)
         invite_link = await bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_date)
 
         logger.info(f"[JOB][{payment_id}] Link gerado. Enviando mensagem para {user_id}...")
-        success_message = (f"🎉 Pagamento confirmado!\n\nSeja bem-vindo(a)! Aqui está seu link de acesso exclusivo:\n\n{invite_link.invite_link}\n\n⚠️ **Atenção:** Este link é de uso único e expira em 15 minutos.")
+        success_message = (f"🎉 Pagamento confirmado!\n\nSeja bem-vindo(a)! Aqui está seu link de acesso exclusivo:\n\n{invite_link.invite_link}\n\n⚠️ **Atenção:** Este link é de uso único e expira em 1 hora.")
         await bot_app.bot.send_message(chat_id=user_id, text=success_message)
         logger.info(f"✅ [JOB][{payment_id}] Acesso concedido com sucesso para o usuário {user_id}")
     except Exception as e:
@@ -200,7 +197,6 @@ async def mercadopago_webhook():
     payment_id = data.get("data", {}).get("id")
     if payment_id:
         logger.info(f"Webhook do MP recebido para o pagamento {payment_id}. Agendando processamento.")
-        # O método correto para rodar uma tarefa em background no Quart/Asyncio
         asyncio.create_task(process_approved_payment(str(payment_id)))
 
     return "OK", 200
