@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.request import HTTPXRequest
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -41,7 +42,13 @@ payment_processing_lock = threading.Lock() # Lock ainda é útil para duplicatas
 
 request_config = {'connect_timeout': 10.0, 'read_timeout': 20.0}
 httpx_request = HTTPXRequest(**request_config)
-bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(httpx_request).build()
+bot_app = (
+    Application.builder()
+    .token(TELEGRAM_BOT_TOKEN)
+    .request(httpx_request)
+    .job_queue(JobQueue())  # Adiciona e ativa a JobQueue
+    .build()
+)
 
 app = Quart(__name__)
 
