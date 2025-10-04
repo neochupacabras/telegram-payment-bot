@@ -1,4 +1,4 @@
-# --- START OF FILE app.py (WEBHOOK ARCHITECTURE) ---
+# --- START OF FILE app.py (FINAL WEBHOOK ARCHITECTURE) ---
 
 # --- IMPORTS ---
 import os
@@ -30,7 +30,7 @@ TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN")
 MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN")
 GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 PAYMENT_AMOUNT_STR = os.getenv("PAYMENT_AMOUNT")
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL") # Deve ser a URL base, ex: https://seu-app.onrender.com
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 
 required_vars = {
     "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN, "TELEGRAM_SECRET_TOKEN": TELEGRAM_SECRET_TOKEN,
@@ -56,7 +56,6 @@ processed_payments = set()
 payment_processing_lock = threading.Lock()
 
 # --- INICIALIZAÇÃO DO BOT (MODO WEBHOOK) ---
-# Timeouts aumentados para evitar problemas de rede
 request_config = {'connect_timeout': 10.0, 'read_timeout': 20.0, 'write_timeout': 30.0}
 httpx_request = HTTPXRequest(**request_config)
 bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(httpx_request).build()
@@ -91,7 +90,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             await query.edit_message_text(text="Desculpe, ocorreu um erro ao gerar sua cobrança. Tente novamente mais tarde.")
 
-# Registra os handlers na aplicação do bot
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CallbackQueryHandler(button_handler))
 
@@ -109,7 +107,8 @@ def create_pix_payment(user_id: int, user_name: str) -> dict:
         logger.error(f"Erro ao criar pagamento no Mercado Pago: {e}")
         return None
 
-async def send_access_link(user_id: int):
+async def send_access_link_job(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data['user_id']
     try:
         logger.info(f"Gerando link de convite para o usuário {user_id}.")
         expire_date = datetime.now() + timedelta(minutes=15)
@@ -138,7 +137,9 @@ def process_approved_payment(payment_id: str):
 
         if status == "approved" and external_reference:
             user_id = int(external_reference)
-            asyncio.run(send_access_link(user_id))
+            # --- CORREÇÃO 2: USANDO A JOB QUEUE PARA MAIOR EFICIÊNCIA ---
+            # Em vez de asyncio.run(), agendamos a tarefa na fila do bot.
+            bot_app.job_queue.run_once(send_access_link_job, when=0, data={'user_id': user_id})
         else:
             logger.info(f"Pagamento {payment_id} não aprovado (Status: {status}). Removendo do cache.")
             with payment_processing_lock:
@@ -160,7 +161,7 @@ async def telegram_webhook():
     secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret_token != TELEGRAM_SECRET_TOKEN:
         logger.warning("Webhook do Telegram recebido com token secreto inválido.")
-        abort(403) # Proibido
+        abort(403)
 
     try:
         update_data = request.get_json(force=True)
@@ -185,19 +186,22 @@ def mercadopago_webhook():
 
     return "OK", 200
 
-# --- FUNÇÃO PARA REGISTRAR O WEBHOOK (EXECUTADA UMA VEZ) ---
-async def setup_telegram_webhook():
+# --- FUNÇÃO DE SETUP: INICIALIZAÇÃO E REGISTRO DO WEBHOOK ---
+async def main_setup():
+    # --- CORREÇÃO 1: INICIALIZANDO A APLICAÇÃO ANTES DE USÁ-LA ---
+    await bot_app.initialize()
+
     logger.info(f"Registrando webhook para a URL: {TELEGRAM_WEBHOOK_URL}")
     try:
         await bot_app.bot.set_webhook(
             url=TELEGRAM_WEBHOOK_URL,
             secret_token=TELEGRAM_SECRET_TOKEN,
-            allowed_updates=Update.ALL_TYPES # Recebe todos os tipos de atualizações
+            allowed_updates=Update.ALL_TYPES
         )
         logger.info("Webhook do Telegram registrado com sucesso!")
     except Exception as e:
         logger.error(f"Falha ao registrar webhook do Telegram: {e}")
 
-# Ao iniciar a aplicação Flask, registra o webhook.
-if __name__ != '__main__': # Garante que isso rode quando o Gunicorn iniciar
-    asyncio.run(setup_telegram_webhook())
+# Ao iniciar a aplicação Flask, executa a função de setup.
+if __name__ != '__main__':
+    asyncio.run(main_setup())
