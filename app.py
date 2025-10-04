@@ -187,9 +187,8 @@ def mercadopago_webhook():
 
 # --- CORREÇÃO: USANDO OS GANCHOS DE CICLO DE VIDA DO FLASK ---
 
-@app.before_serving
 async def startup():
-    """Esta função é executada uma vez, antes do servidor começar a aceitar requisições."""
+    """Inicializa o bot e registra o webhook."""
     await bot_app.initialize()
     logger.info(f"Registrando webhook para a URL: {TELEGRAM_WEBHOOK_URL}")
     await bot_app.bot.set_webhook(
@@ -200,9 +199,21 @@ async def startup():
     logger.info("Webhook do Telegram registrado com sucesso!")
 
 async def shutdown_bot():
-    """Esta função é executada quando a aplicação está prestes a fechar."""
+    """Desliga a aplicação do bot de forma limpa."""
     logger.info("Desligando a aplicação do bot...")
     await bot_app.shutdown()
+
+# O Gunicorn executa o código do módulo ao carregar a aplicação.
+# O `if __name__ != '__main__'` garante que isso rode no ambiente de produção.
+if os.getenv('GUNICORN_PID') or __name__ != '__main__':
+    try:
+        # Registra a função de shutdown para ser chamada quando o processo terminar.
+        atexit.register(lambda: asyncio.run(shutdown_bot()))
+        # Executa a função de startup.
+        asyncio.run(startup())
+    except Exception as e:
+        logger.critical(f"Falha crítica durante a inicialização: {e}", exc_info=True)
+        sys.exit(1)
 
 # Registra a função de shutdown para ser chamada quando o processo terminar
 atexit.register(lambda: asyncio.run(shutdown_bot()))
