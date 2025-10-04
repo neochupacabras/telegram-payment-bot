@@ -1,4 +1,4 @@
-# --- START OF FILE app.py ---
+# --- START OF FILE app.py (WEBHOOK ARCHITECTURE) ---
 
 # --- IMPORTS ---
 import os
@@ -11,37 +11,31 @@ import io
 import threading
 import sys
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
-from flask import Flask, request
+from flask import Flask, request, abort
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.request import HTTPXRequest
 
 # --- CONFIGURAÇÃO DE LOGGING ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout,
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 # --- CARREGAMENTO E VALIDAÇÃO DE VARIÁVEIS ---
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN")
 MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN")
 GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 PAYMENT_AMOUNT_STR = os.getenv("PAYMENT_AMOUNT")
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL") # Deve ser a URL base, ex: https://seu-app.onrender.com
 
-# Validação imediata
 required_vars = {
-    "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
-    "MERCADO_PAGO_ACCESS_TOKEN": MERCADO_PAGO_ACCESS_TOKEN,
-    "GROUP_CHAT_ID": GROUP_CHAT_ID_STR,
-    "PAYMENT_AMOUNT": PAYMENT_AMOUNT_STR,
-    "WEBHOOK_BASE_URL": WEBHOOK_BASE_URL
+    "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN, "TELEGRAM_SECRET_TOKEN": TELEGRAM_SECRET_TOKEN,
+    "MERCADO_PAGO_ACCESS_TOKEN": MERCADO_PAGO_ACCESS_TOKEN, "GROUP_CHAT_ID": GROUP_CHAT_ID_STR,
+    "PAYMENT_AMOUNT": PAYMENT_AMOUNT_STR, "WEBHOOK_BASE_URL": WEBHOOK_BASE_URL
 }
 if any(v is None for v in required_vars.values()):
     missing = [k for k, v in required_vars.items() if v is None]
@@ -56,23 +50,24 @@ except (ValueError, TypeError):
     sys.exit(1)
 
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
-global_bot_app = None
+TELEGRAM_WEBHOOK_URL = f"{WEBHOOK_BASE_URL}/webhook/telegram"
+
 processed_payments = set()
 payment_processing_lock = threading.Lock()
+
+# --- INICIALIZAÇÃO DO BOT (MODO WEBHOOK) ---
+# Timeouts aumentados para evitar problemas de rede
+request_config = {'connect_timeout': 10.0, 'read_timeout': 20.0, 'write_timeout': 30.0}
+httpx_request = HTTPXRequest(**request_config)
+bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(httpx_request).build()
 
 # --- INICIALIZAÇÃO DO FLASK ---
 app = Flask(__name__)
 
-# --- FUNÇÕES DO BOT ---
+# --- FUNÇÕES DE LÓGICA DO BOT (Handlers) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    welcome_message = (
-        f"Olá, {user.first_name}!\n\n"
-        "Bem-vindo(a) ao bot de acesso ao nosso grupo exclusivo.\n\n"
-        "O grupo contém [descreva os benefícios do seu grupo aqui].\n\n"
-        f"O valor do acesso único é de R$ {PAYMENT_AMOUNT:.2f}.\n\n"
-        "Para entrar, clique no botão abaixo e realize o pagamento via PIX."
-    )
+    welcome_message = (f"Olá, {user.first_name}!\n\nBem-vindo(a) ao bot de acesso ao nosso grupo exclusivo.\n\nO valor do acesso único é de R$ {PAYMENT_AMOUNT:.2f}.\n\nPara entrar, clique no botão abaixo e realize o pagamento via PIX.")
     keyboard = [[InlineKeyboardButton("✅ Quero Entrar (Pagar com PIX)", callback_data='generate_payment')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
@@ -88,58 +83,47 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text(text="Gerando sua cobrança PIX, aguarde um instante...")
         payment_data = create_pix_payment(user_id, user_name)
         if payment_data:
-            qr_code_base64 = payment_data['qr_code_base64']
-            pix_copy_paste = payment_data['pix_copy_paste']
-            qr_code_image = base64.b64decode(qr_code_base64)
+            qr_code_image = base64.b64decode(payment_data['qr_code_base64'])
             image_stream = io.BytesIO(qr_code_image)
-            image_stream.name = 'pix_qr_code.png'
             await context.bot.send_photo(chat_id=chat_id, photo=image_stream, caption="Use o QR Code acima ou o código abaixo para pagar.")
-            await context.bot.send_message(chat_id=chat_id, text=f"PIX Copia e Cola:\n\n`{pix_copy_paste}`", parse_mode='MarkdownV2')
+            await context.bot.send_message(chat_id=chat_id, text=f"PIX Copia e Cola:\n\n`{payment_data['pix_copy_paste']}`", parse_mode='MarkdownV2')
             await context.bot.send_message(chat_id=chat_id, text="Assim que o pagamento for confirmado, você receberá o link de acesso automaticamente!")
         else:
             await query.edit_message_text(text="Desculpe, ocorreu um erro ao gerar sua cobrança. Tente novamente mais tarde.")
 
+# Registra os handlers na aplicação do bot
+bot_app.add_handler(CommandHandler("start", start))
+bot_app.add_handler(CallbackQueryHandler(button_handler))
+
+# --- FUNÇÕES DE PAGAMENTO ---
 def create_pix_payment(user_id: int, user_name: str) -> dict:
     url = "https://api.mercadopago.com/v1/payments"
     headers = { "Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}", "Content-Type": "application/json", "X-Idempotency-Key": str(uuid.uuid4()) }
-    payload = {
-        "transaction_amount": PAYMENT_AMOUNT, "description": f"Acesso ao grupo exclusivo para {user_name}", "payment_method_id": "pix",
-        "payer": { "email": f"user_{user_id}@telegram.bot", "first_name": user_name },
-        "notification_url": NOTIFICATION_URL, "external_reference": str(user_id)
-    }
+    payload = {"transaction_amount": PAYMENT_AMOUNT, "description": f"Acesso ao grupo exclusivo para {user_name}", "payment_method_id": "pix", "payer": { "email": f"user_{user_id}@telegram.bot", "first_name": user_name }, "notification_url": NOTIFICATION_URL, "external_reference": str(user_id)}
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=10)
         response.raise_for_status()
         data = response.json()
         return { 'qr_code_base64': data['point_of_interaction']['transaction_data']['qr_code_base64'], 'pix_copy_paste': data['point_of_interaction']['transaction_data']['qr_code'] }
     except requests.exceptions.RequestException as e:
-        logger.error(f"Erro ao criar pagamento no Mercado Pago: {e}", exc_info=True)
+        logger.error(f"Erro ao criar pagamento no Mercado Pago: {e}")
         return None
 
 async def send_access_link(user_id: int):
-    if not global_bot_app:
-        logger.error("A aplicação do bot não está inicializada. Não é possível enviar o link.")
-        return
     try:
-        logger.info(f"Gerando link de convite para o usuário {user_id}...")
-        # CORREÇÃO: Link com validade de 1 hora usando UTC
-        expire_date = datetime.now(timezone.utc) + timedelta(hours=1)
-        invite_link = await global_bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_date)
-        success_message = (
-            "🎉 Pagamento confirmado com sucesso!\n\n"
-            "Seja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n"
-            f"{invite_link.invite_link}\n\n"
-            "⚠️ **Atenção:** Este link é de uso único e expira em 1 hora. Não pode ser compartilhado."
-        )
-        await global_bot_app.bot.send_message(chat_id=user_id, text=success_message)
+        logger.info(f"Gerando link de convite para o usuário {user_id}.")
+        expire_date = datetime.now() + timedelta(minutes=15)
+        invite_link = await bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_date)
+        success_message = (f"🎉 Pagamento confirmado com sucesso!\n\nSeja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n{invite_link.invite_link}\n\n⚠️ **Atenção:** Este link é de uso único e expira em 15 minutos.")
+        await bot_app.bot.send_message(chat_id=user_id, text=success_message)
         logger.info(f"✅ Acesso concedido com sucesso para o usuário {user_id}")
     except Exception as e:
-        logger.error(f"Falha ao enviar link de acesso para o usuário {user_id}: {e}", exc_info=True)
+        logger.error(f"Falha ao enviar link de acesso para o usuário {user_id}: {e}")
 
 def process_approved_payment(payment_id: str):
     with payment_processing_lock:
         if payment_id in processed_payments:
-            logger.info(f"Pagamento {payment_id} já foi processado ou está em processamento por outra thread.")
+            logger.info(f"Pagamento {payment_id} já foi processado ou está em processamento.")
             return
         processed_payments.add(payment_id)
 
@@ -151,80 +135,69 @@ def process_approved_payment(payment_id: str):
         payment_info = response.json()
         status = payment_info.get("status")
         external_reference = payment_info.get("external_reference")
-        logger.info(f"Detalhes do pagamento {payment_id}: status={status}, external_reference={external_reference}")
+
         if status == "approved" and external_reference:
             user_id = int(external_reference)
-            if global_bot_app and global_bot_app.loop:
-                asyncio.run_coroutine_threadsafe(send_access_link(user_id), global_bot_app.loop)
-            else:
-                logger.error("Bot ou seu loop de eventos não estão prontos. Não foi possível agendar o envio do link.")
+            asyncio.run(send_access_link(user_id))
         else:
-            logger.info(f"Pagamento {payment_id} não está aprovado. Status: {status}. Removendo do cache para permitir nova notificação.")
+            logger.info(f"Pagamento {payment_id} não aprovado (Status: {status}). Removendo do cache.")
             with payment_processing_lock:
-                 if payment_id in processed_payments:
-                      processed_payments.remove(payment_id)
-
+                if payment_id in processed_payments:
+                    processed_payments.remove(payment_id)
     except requests.exceptions.RequestException as e:
-        logger.error(f"Erro ao processar pagamento {payment_id}: {e}", exc_info=True)
+        logger.error(f"Erro ao processar pagamento {payment_id}: {e}")
         with payment_processing_lock:
             if payment_id in processed_payments:
                 processed_payments.remove(payment_id)
 
+# --- ROTAS DO FLASK (WEBHOOKS) ---
 @app.route("/")
 def health_check():
-    return "Bot is alive!", 200
+    return "Bot is alive and running in webhook mode!", 200
+
+@app.route("/webhook/telegram", methods=['POST'])
+async def telegram_webhook():
+    secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if secret_token != TELEGRAM_SECRET_TOKEN:
+        logger.warning("Webhook do Telegram recebido com token secreto inválido.")
+        abort(403) # Proibido
+
+    try:
+        update_data = request.get_json(force=True)
+        update = Update.de_json(update_data, bot_app.bot)
+        await bot_app.process_update(update)
+        return "OK", 200
+    except Exception as e:
+        logger.error(f"Erro ao processar webhook do Telegram: {e}", exc_info=True)
+        return "Internal Server Error", 500
 
 @app.route("/webhook/mercadopago", methods=['POST'])
 def mercadopago_webhook():
     data = request.get_json(silent=True)
     if not data:
-        logger.warning("Webhook recebido sem dados JSON")
         return "Bad Request", 400
+
     logger.info(f"Webhook do MP recebido: {data}")
-    payment_id = None
-    if data.get("topic") == "payment" or "payment" in data.get("action", ""):
-        resource = data.get("resource", "")
-        if "payments/" in resource:
-            payment_id = resource.split("payments/")[-1]
-        elif resource.isdigit():
-             payment_id = resource
-        else:
-            payment_id = data.get("data", {}).get("id")
+    payment_id = data.get("data", {}).get("id")
+
     if payment_id:
-        logger.info(f"Processando notificação do pagamento: {payment_id}")
         threading.Thread(target=process_approved_payment, args=(str(payment_id),)).start()
-    else:
-        logger.warning(f"Webhook recebido sem payment_id identificável: {data}")
+
     return "OK", 200
 
-def run_bot_polling():
-    global global_bot_app
-    logger.info("Configurando a aplicação do bot na sua própria thread...")
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# --- FUNÇÃO PARA REGISTRAR O WEBHOOK (EXECUTADA UMA VEZ) ---
+async def setup_telegram_webhook():
+    logger.info(f"Registrando webhook para a URL: {TELEGRAM_WEBHOOK_URL}")
     try:
-        request_config = {
-            'connect_timeout': 15.0,
-            'read_timeout': 30.0,
-            'write_timeout': 30.0,
-            'pool_timeout': 10.0
-        }
-        httpx_request = HTTPXRequest(**request_config)
-
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(httpx_request).build()
-
-        # FORÇA REMOÇÃO DE WEBHOOK ANTES DE INICIAR POLLING
-        logger.info("Removendo qualquer webhook existente...")
-        loop.run_until_complete(application.bot.delete_webhook(drop_pending_updates=True))
-        logger.info("Webhook removido com sucesso!")
-
-        global_bot_app = application
-        global_bot_app.loop = loop
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button_handler))
-        logger.info("Aplicação do bot configurada. Iniciando polling...")
-        application.run_polling(stop_signals=None, drop_pending_updates=True)
+        await bot_app.bot.set_webhook(
+            url=TELEGRAM_WEBHOOK_URL,
+            secret_token=TELEGRAM_SECRET_TOKEN,
+            allowed_updates=Update.ALL_TYPES # Recebe todos os tipos de atualizações
+        )
+        logger.info("Webhook do Telegram registrado com sucesso!")
     except Exception as e:
-        logger.critical(f"ERRO FATAL NA THREAD DO BOT: {e}", exc_info=True)
+        logger.error(f"Falha ao registrar webhook do Telegram: {e}")
 
-# --- END OF FILE app.py ---
+# Ao iniciar a aplicação Flask, registra o webhook.
+if __name__ != '__main__': # Garante que isso rode quando o Gunicorn iniciar
+    asyncio.run(setup_telegram_webhook())
