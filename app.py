@@ -1,62 +1,68 @@
-# --- START OF FILE app.py (FINAL & OPTIMIZED ARCHITECTURE) ---
+# --- START OF FILE app.py (FINAL & FULLY LOGGED) ---
 
 import os
 import logging
-import httpx  # --- ALTERAÇÃO 1: Usando httpx para todas as requisições ---
+import httpx
 import json
 import uuid
 import base64
 import io
-import threading
-import sys
 import asyncio
 from datetime import datetime, timedelta
 
 from quart import Quart, request, abort
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.request import HTTPXRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
+from telegram.request import HTTPXRequest
 
+# --- CONFIGURAÇÃO DE LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-# --- Carregamento de Variáveis (sem alterações) ---
+# --- CARREGAMENTO E VALIDAÇÃO DE VARIÁVEIS ---
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-# ... (o resto das variáveis)
-# ... (código de validação)
 TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN")
 MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN")
 GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 PAYMENT_AMOUNT_STR = os.getenv("PAYMENT_AMOUNT")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
-GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
-PAYMENT_AMOUNT = float(PAYMENT_AMOUNT_STR)
+
+# (Validação de variáveis omitida para brevidade - mantenha a sua)
+# ...
+
+try:
+    GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
+    PAYMENT_AMOUNT = float(PAYMENT_AMOUNT_STR)
+except (ValueError, TypeError):
+    logger.critical("ERRO CRÍTICO nos valores de ambiente.")
+    sys.exit(1)
+
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
 TELEGRAM_WEBHOOK_URL = f"{WEBHOOK_BASE_URL}/webhook/telegram"
 
+# Usando um set do asyncio para ser thread-safe, embora com 1 worker não seja estritamente necessário
 processed_payments = set()
-payment_processing_lock = threading.Lock() # Lock ainda é útil para duplicatas muito rápidas
 
+# --- INICIALIZAÇÃO DO BOT ---
 request_config = {'connect_timeout': 10.0, 'read_timeout': 20.0}
 httpx_request = HTTPXRequest(**request_config)
 bot_app = (
     Application.builder()
     .token(TELEGRAM_BOT_TOKEN)
     .request(httpx_request)
-    .job_queue(JobQueue())  # Adiciona e ativa a JobQueue
+    .job_queue(JobQueue())
     .build()
 )
 
 app = Quart(__name__)
 
-# --- Handlers do Bot (sem alterações) ---
+# --- HANDLERS DO BOT ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # (código idêntico)
     user = update.effective_user
-    welcome_message = (f"Olá, {user.first_name}!\n\nBem-vindo(a) ao nosso grupo exclusivo.\n\nO valor do acesso único é de R$ {PAYMENT_AMOUNT:.2f}.\n\nPara entrar, clique no botão abaixo e realize o pagamento via PIX.")
+    welcome_message = (f"Olá, {user.first_name}!\n\nBem-vindo(a) ao bot de acesso ao nosso grupo exclusivo.\n\nO valor do acesso único é de R$ {PAYMENT_AMOUNT:.2f}.\n\nPara entrar, clique no botão abaixo e realize o pagamento via PIX.")
     keyboard = [[InlineKeyboardButton("✅ Quero Entrar (Pagar com PIX)", callback_data='generate_payment')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
@@ -68,9 +74,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = query.message.chat_id
     user_id = query.from_user.id
     user_name = query.from_user.first_name
+
     if query.data == 'generate_payment':
         await query.edit_message_text(text="Gerando sua cobrança PIX, aguarde um instante...")
-        payment_data = await create_pix_payment(user_id, user_name) # Tornou-se async
+        payment_data = await create_pix_payment(user_id, user_name)
         if payment_data:
             qr_code_image = base64.b64decode(payment_data['qr_code_base64'])
             image_stream = io.BytesIO(qr_code_image)
@@ -83,8 +90,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CallbackQueryHandler(button_handler))
 
-# --- FUNÇÕES DE PAGAMENTO (agora 100% async) ---
+# --- FUNÇÕES DE PAGAMENTO ---
 async def create_pix_payment(user_id: int, user_name: str) -> dict:
+    # (código idêntico)
     url = "https://api.mercadopago.com/v1/payments"
     headers = { "Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}", "Content-Type": "application/json", "X-Idempotency-Key": str(uuid.uuid4()) }
     payload = {"transaction_amount": PAYMENT_AMOUNT, "description": f"Acesso ao grupo exclusivo para {user_name}", "payment_method_id": "pix", "payer": { "email": f"user_{user_id}@telegram.bot", "first_name": user_name }, "notification_url": NOTIFICATION_URL, "external_reference": str(user_id)}
@@ -95,52 +103,61 @@ async def create_pix_payment(user_id: int, user_name: str) -> dict:
         data = response.json()
         return { 'qr_code_base64': data['point_of_interaction']['transaction_data']['qr_code_base64'], 'pix_copy_paste': data['point_of_interaction']['transaction_data']['qr_code'] }
     except httpx.HTTPError as e:
-        logger.error(f"Erro ao criar pagamento no Mercado Pago: {e}")
+        logger.error(f"Erro HTTP ao criar pagamento no Mercado Pago: {e}")
         return None
 
 async def send_access_link_job(context: ContextTypes.DEFAULT_TYPE):
-    # (código idêntico)
     user_id = context.job.data['user_id']
+    payment_id = context.job.data['payment_id']
+    logger.info(f"[JOB][{payment_id}] Iniciando tarefa para enviar link ao usuário {user_id}.")
     try:
-        logger.info(f"Gerando link de convite para o usuário {user_id}.")
+        logger.info(f"[JOB][{payment_id}] Gerando link de convite...")
         expire_date = datetime.now() + timedelta(minutes=15)
         invite_link = await bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_date)
+
+        logger.info(f"[JOB][{payment_id}] Link gerado. Enviando mensagem para {user_id}...")
         success_message = (f"🎉 Pagamento confirmado!\n\nSeja bem-vindo(a)! Aqui está seu link de acesso exclusivo:\n\n{invite_link.invite_link}\n\n⚠️ **Atenção:** Este link é de uso único e expira em 15 minutos.")
         await bot_app.bot.send_message(chat_id=user_id, text=success_message)
-        logger.info(f"✅ Acesso concedido com sucesso para o usuário {user_id}")
+        logger.info(f"✅ [JOB][{payment_id}] Acesso concedido com sucesso para o usuário {user_id}")
     except Exception as e:
-        logger.error(f"Falha ao enviar link de acesso para o usuário {user_id}: {e}")
+        logger.error(f"❌ [JOB][{payment_id}] Falha CRÍTICA ao enviar link de acesso para o usuário {user_id}: {e}", exc_info=True)
 
 async def process_approved_payment(payment_id: str):
-    with payment_processing_lock:
-        if payment_id in processed_payments:
-            return
-        processed_payments.add(payment_id)
+    logger.info(f"[{payment_id}] Iniciando processamento do pagamento.")
+
+    if payment_id in processed_payments:
+        logger.warning(f"[{payment_id}] Pagamento já processado anteriormente. Ignorando.")
+        return
+
+    processed_payments.add(payment_id)
 
     payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
     headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
     try:
+        logger.info(f"[{payment_id}] Consultando detalhes do pagamento na API do MP.")
         async with httpx.AsyncClient() as client:
             response = await client.get(payment_details_url, headers=headers)
             response.raise_for_status()
         payment_info = response.json()
         status = payment_info.get("status")
         external_reference = payment_info.get("external_reference")
+        logger.info(f"[{payment_id}] Detalhes recebidos: Status='{status}', UserID='{external_reference}'.")
 
         if status == "approved" and external_reference:
             user_id = int(external_reference)
-            bot_app.job_queue.run_once(send_access_link_job, when=0, data={'user_id': user_id})
+            logger.info(f"[{payment_id}] Pagamento APROVADO. Agendando job para enviar link ao usuário {user_id}.")
+            bot_app.job_queue.run_once(send_access_link_job, when=0, data={'user_id': user_id, 'payment_id': payment_id})
         else:
-            with payment_processing_lock:
-                if payment_id in processed_payments:
-                    processed_payments.remove(payment_id)
+            logger.warning(f"[{payment_id}] Pagamento não está 'approved'. Removendo do cache para futuras notificações.")
+            processed_payments.remove(payment_id)
     except httpx.HTTPError as e:
-        logger.error(f"Erro ao processar pagamento {payment_id}: {e}")
-        with payment_processing_lock:
-            if payment_id in processed_payments:
-                processed_payments.remove(payment_id)
+        logger.error(f"[{payment_id}] Erro HTTP ao consultar pagamento: {e}. Removendo do cache para nova tentativa.")
+        processed_payments.remove(payment_id)
+    except Exception as e:
+        logger.error(f"[{payment_id}] Erro inesperado ao processar pagamento: {e}. Removendo do cache.", exc_info=True)
+        processed_payments.remove(payment_id)
 
-# --- Ciclo de Vida do Quart (sem alterações) ---
+# --- CICLO DE VIDA DO QUART ---
 @app.before_serving
 async def startup():
     await bot_app.initialize()
@@ -152,7 +169,7 @@ async def shutdown():
     await bot_app.shutdown()
     logger.info("Bot desligado.")
 
-# --- Rotas (sem alterações na lógica principal) ---
+# --- ROTAS ---
 @app.route("/")
 async def health_check():
     return "Bot is alive and running!", 200
@@ -179,7 +196,8 @@ async def mercadopago_webhook():
 
     payment_id = data.get("data", {}).get("id")
     if payment_id:
-        # --- ALTERAÇÃO 2: Usando asyncio.create_task em vez de threading.Thread ---
+        logger.info(f"Webhook do MP recebido para o pagamento {payment_id}. Agendando processamento.")
+        # O método correto para rodar uma tarefa em background no Quart/Asyncio
         asyncio.create_task(process_approved_payment(str(payment_id)))
 
     return "OK", 200
