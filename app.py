@@ -156,16 +156,11 @@ async def send_access_link(user_id: int):
         logger.error(f"Falha ao enviar link de acesso para o usuário {user_id}: {e}", exc_info=True)
 
 def process_approved_payment(payment_id: str):
-    # --- ALTERAÇÃO 2: Usar o Lock para proteger a seção crítica ---
-    with payment_processing_lock: # <--- ADICIONE ESTA LINHA E INDENTE O BLOCO ABAIXO
-        if payment_id in processed_payments:
-            logger.info(f"Pagamento {payment_id} já foi processado ou está em processamento.")
-            return # Sai imediatamente se já foi processado
+    # A verificação de duplicidade é a primeira coisa a ser feita.
+    if payment_id in processed_payments:
+        logger.info(f"Pagamento {payment_id} já foi processado anteriormente.")
+        return
 
-        # Adiciona ao cache ANTES de fazer qualquer chamada de rede
-        processed_payments.add(payment_id)
-
-    # O resto do código fica fora do lock para não bloquear chamadas de rede
     payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
     headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
     try:
@@ -175,7 +170,12 @@ def process_approved_payment(payment_id: str):
         status = payment_info.get("status")
         external_reference = payment_info.get("external_reference")
         logger.info(f"Detalhes do pagamento {payment_id}: status={status}, external_reference={external_reference}")
+
         if status == "approved" and external_reference:
+            # Adiciona ao set APENAS quando o pagamento for aprovado com sucesso.
+            # Isso evita a condição de corrida de forma mais simples.
+            processed_payments.add(payment_id)
+
             user_id = int(external_reference)
             if global_bot_app and global_bot_app.loop:
                 asyncio.run_coroutine_threadsafe(send_access_link(user_id), global_bot_app.loop)
@@ -183,18 +183,9 @@ def process_approved_payment(payment_id: str):
                 logger.error("Bot ou seu loop de eventos não estão prontos. Não foi possível agendar o envio do link.")
         else:
             logger.info(f"Pagamento {payment_id} não está aprovado ou sem external_reference. Status: {status}")
-            # Se o pagamento falhou ou ainda está pendente, removemos do set para que
-            # uma futura notificação de "approved" possa ser processada.
-            with payment_processing_lock:
-                 if payment_id in processed_payments:
-                      processed_payments.remove(payment_id)
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Erro ao processar pagamento {payment_id}: {e}", exc_info=True)
-        # Em caso de erro, também removemos para permitir uma nova tentativa
-        with payment_processing_lock:
-            if payment_id in processed_payments:
-                processed_payments.remove(payment_id)
 
 # --- ROTAS DO FLASK ---
 @app.route("/")
