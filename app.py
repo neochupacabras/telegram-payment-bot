@@ -162,11 +162,13 @@ async def process_approved_payment(payment_id: str):
 @app.before_serving
 async def startup():
     await bot_app.initialize()
+    await bot_app.start()
     await bot_app.bot.set_webhook(url=TELEGRAM_WEBHOOK_URL, secret_token=TELEGRAM_SECRET_TOKEN)
     logger.info("Bot inicializado e webhook registrado.")
 
 @app.after_serving
 async def shutdown():
+    await bot_app.stop()
     await bot_app.shutdown()
     logger.info("Bot desligado.")
 
