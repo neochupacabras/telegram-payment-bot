@@ -1,4 +1,4 @@
-# --- START OF FILE app.py (FINAL WEBHOOK ARCHITECTURE) ---
+# --- START OF FILE app.py (FINAL & CORRECTED WEBHOOK ARCHITECTURE) ---
 
 # --- IMPORTS ---
 import os
@@ -11,6 +11,7 @@ import io
 import threading
 import sys
 import asyncio
+import atexit  # Importa o atexit para o shutdown
 from datetime import datetime, timedelta
 
 from flask import Flask, request, abort
@@ -137,8 +138,6 @@ def process_approved_payment(payment_id: str):
 
         if status == "approved" and external_reference:
             user_id = int(external_reference)
-            # --- CORREÇÃO 2: USANDO A JOB QUEUE PARA MAIOR EFICIÊNCIA ---
-            # Em vez de asyncio.run(), agendamos a tarefa na fila do bot.
             bot_app.job_queue.run_once(send_access_link_job, when=0, data={'user_id': user_id})
         else:
             logger.info(f"Pagamento {payment_id} não aprovado (Status: {status}). Removendo do cache.")
@@ -186,22 +185,26 @@ def mercadopago_webhook():
 
     return "OK", 200
 
-# --- FUNÇÃO DE SETUP: INICIALIZAÇÃO E REGISTRO DO WEBHOOK ---
-async def main_setup():
-    # --- CORREÇÃO 1: INICIALIZANDO A APLICAÇÃO ANTES DE USÁ-LA ---
+# --- CORREÇÃO: USANDO OS GANCHOS DE CICLO DE VIDA DO FLASK ---
+
+@app.before_serving
+async def startup():
+    """Esta função é executada uma vez, antes do servidor começar a aceitar requisições."""
     await bot_app.initialize()
-
     logger.info(f"Registrando webhook para a URL: {TELEGRAM_WEBHOOK_URL}")
-    try:
-        await bot_app.bot.set_webhook(
-            url=TELEGRAM_WEBHOOK_URL,
-            secret_token=TELEGRAM_SECRET_TOKEN,
-            allowed_updates=Update.ALL_TYPES
-        )
-        logger.info("Webhook do Telegram registrado com sucesso!")
-    except Exception as e:
-        logger.error(f"Falha ao registrar webhook do Telegram: {e}")
+    await bot_app.bot.set_webhook(
+        url=TELEGRAM_WEBHOOK_URL,
+        secret_token=TELEGRAM_SECRET_TOKEN,
+        allowed_updates=Update.ALL_TYPES
+    )
+    logger.info("Webhook do Telegram registrado com sucesso!")
 
-# Ao iniciar a aplicação Flask, executa a função de setup.
-if __name__ != '__main__':
-    asyncio.run(main_setup())
+async def shutdown_bot():
+    """Esta função é executada quando a aplicação está prestes a fechar."""
+    logger.info("Desligando a aplicação do bot...")
+    await bot_app.shutdown()
+
+# Registra a função de shutdown para ser chamada quando o processo terminar
+atexit.register(lambda: asyncio.run(shutdown_bot()))
+
+# --- FIM DA CORREÇÃO ---
