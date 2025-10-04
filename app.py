@@ -11,12 +11,14 @@ import io
 import threading
 import sys
 import asyncio
+from datetime import datetime, timedelta
 
 from flask import Flask, request
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from datetime import datetime, timedelta
+# --- NOVO IMPORT PARA AUMENTAR O TIMEOUT ---
+from telegram.request import HTTPXRequest
 
 # --- CONFIGURAÇÃO DE LOGGING ---
 logging.basicConfig(
@@ -57,6 +59,7 @@ except (ValueError, TypeError):
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
 global_bot_app = None
 processed_payments = set()
+# --- CORREÇÃO 1: REINTRODUZINDO O THREADING LOCK ---
 payment_processing_lock = threading.Lock()
 
 # --- INICIALIZAÇÃO DO FLASK ---
@@ -100,50 +103,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def create_pix_payment(user_id: int, user_name: str) -> dict:
     url = "https://api.mercadopago.com/v1/payments"
-    headers = {
-        "Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-        "X-Idempotency-Key": str(uuid.uuid4())
-    }
+    headers = { "Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}", "Content-Type": "application/json", "X-Idempotency-Key": str(uuid.uuid4()) }
     payload = {
-        "transaction_amount": PAYMENT_AMOUNT,
-        "description": f"Acesso ao grupo exclusivo para {user_name}",
-        "payment_method_id": "pix",
+        "transaction_amount": PAYMENT_AMOUNT, "description": f"Acesso ao grupo exclusivo para {user_name}", "payment_method_id": "pix",
         "payer": { "email": f"user_{user_id}@telegram.bot", "first_name": user_name },
-        "notification_url": NOTIFICATION_URL,
-        "external_reference": str(user_id)
+        "notification_url": NOTIFICATION_URL, "external_reference": str(user_id)
     }
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload))
         response.raise_for_status()
         data = response.json()
-        return {
-            'qr_code_base64': data['point_of_interaction']['transaction_data']['qr_code_base64'],
-            'pix_copy_paste': data['point_of_interaction']['transaction_data']['qr_code']
-        }
+        return { 'qr_code_base64': data['point_of_interaction']['transaction_data']['qr_code_base64'], 'pix_copy_paste': data['point_of_interaction']['transaction_data']['qr_code'] }
     except requests.exceptions.RequestException as e:
         logger.error(f"Erro ao criar pagamento no Mercado Pago: {e}", exc_info=True)
         return None
 
 async def send_access_link(user_id: int):
-    """Cria e envia o link de convite para o usuário, com data de expiração."""
     if not global_bot_app:
         logger.error("A aplicação do bot não está inicializada. Não é possível enviar o link.")
         return
     try:
         logger.info(f"Gerando link de convite para o usuário {user_id}...")
-
-        # --- ALTERAÇÃO PRINCIPAL AQUI ---
-        # Define uma data de expiração para 15 minutos a partir de agora.
         expire_date = datetime.now() + timedelta(minutes=15)
-
-        # Cria o link com o limite de 1 membro E a data de expiração.
-        invite_link = await global_bot_app.bot.create_chat_invite_link(
-            chat_id=GROUP_CHAT_ID,
-            member_limit=1,
-            expire_date=expire_date
-        )
-
+        invite_link = await global_bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_date)
         success_message = (
             "🎉 Pagamento confirmado com sucesso!\n\n"
             "Seja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n"
@@ -156,10 +138,13 @@ async def send_access_link(user_id: int):
         logger.error(f"Falha ao enviar link de acesso para o usuário {user_id}: {e}", exc_info=True)
 
 def process_approved_payment(payment_id: str):
-    # A verificação de duplicidade é a primeira coisa a ser feita.
-    if payment_id in processed_payments:
-        logger.info(f"Pagamento {payment_id} já foi processado anteriormente.")
-        return
+    # --- CORREÇÃO 1: USANDO O LOCK PARA GARANTIR EXECUÇÃO ÚNICA ---
+    with payment_processing_lock:
+        if payment_id in processed_payments:
+            logger.info(f"Pagamento {payment_id} já foi processado ou está em processamento por outra thread.")
+            return
+        # Adiciona ao set IMEDIATAMENTE dentro do lock para prevenir a condição de corrida
+        processed_payments.add(payment_id)
 
     payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
     headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
@@ -170,24 +155,24 @@ def process_approved_payment(payment_id: str):
         status = payment_info.get("status")
         external_reference = payment_info.get("external_reference")
         logger.info(f"Detalhes do pagamento {payment_id}: status={status}, external_reference={external_reference}")
-
         if status == "approved" and external_reference:
-            # Adiciona ao set APENAS quando o pagamento for aprovado com sucesso.
-            # Isso evita a condição de corrida de forma mais simples.
-            processed_payments.add(payment_id)
-
             user_id = int(external_reference)
             if global_bot_app and global_bot_app.loop:
                 asyncio.run_coroutine_threadsafe(send_access_link(user_id), global_bot_app.loop)
             else:
                 logger.error("Bot ou seu loop de eventos não estão prontos. Não foi possível agendar o envio do link.")
         else:
-            logger.info(f"Pagamento {payment_id} não está aprovado ou sem external_reference. Status: {status}")
+            logger.info(f"Pagamento {payment_id} não está aprovado. Status: {status}. Removendo do cache para permitir nova notificação.")
+            with payment_processing_lock:
+                 if payment_id in processed_payments:
+                      processed_payments.remove(payment_id)
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Erro ao processar pagamento {payment_id}: {e}", exc_info=True)
+        with payment_processing_lock:
+            if payment_id in processed_payments:
+                processed_payments.remove(payment_id)
 
-# --- ROTAS DO FLASK ---
 @app.route("/")
 def health_check():
     return "Bot is alive!", 200
@@ -198,38 +183,41 @@ def mercadopago_webhook():
     if not data:
         logger.warning("Webhook recebido sem dados JSON")
         return "Bad Request", 400
-
     logger.info(f"Webhook do MP recebido: {data}")
     payment_id = None
-
-    # --- LÓGICA DE EXTRAÇÃO DO ID CORRIGIDA ---
     if data.get("topic") == "payment" or "payment" in data.get("action", ""):
-        # Formato novo (às vezes 'resource' é uma URL, às vezes só o ID)
         resource = data.get("resource", "")
         if "payments/" in resource:
             payment_id = resource.split("payments/")[-1]
-        elif resource.isdigit(): # Checa se o 'resource' é apenas o ID numérico
+        elif resource.isdigit():
              payment_id = resource
         else:
-            # Formato antigo ou novo com 'data.id'
             payment_id = data.get("data", {}).get("id")
-
     if payment_id:
         logger.info(f"Processando notificação do pagamento: {payment_id}")
         threading.Thread(target=process_approved_payment, args=(str(payment_id),)).start()
     else:
         logger.warning(f"Webhook recebido sem payment_id identificável: {data}")
-
     return "OK", 200
 
-# --- INICIALIZAÇÃO DO BOT ---
 def run_bot_polling():
     global global_bot_app
     logger.info("Configurando a aplicação do bot na sua própria thread...")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        # --- CORREÇÃO 2: AUMENTANDO O TIMEOUT PARA EVITAR ERROS DE REDE ---
+        # Define timeouts mais longos (em segundos)
+        request_config = {
+            'connect_timeout': 10.0,
+            'read_timeout': 20.0,
+            'write_timeout': 30.0  # Especialmente importante para uploads (fotos)
+        }
+        httpx_request = HTTPXRequest(**request_config)
+
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(httpx_request).build()
+        # --- FIM DA CORREÇÃO 2 ---
+
         global_bot_app = application
         global_bot_app.loop = loop
         application.add_handler(CommandHandler("start", start))
@@ -238,7 +226,5 @@ def run_bot_polling():
         application.run_polling(stop_signals=None, drop_pending_updates=True)
     except Exception as e:
         logger.critical(f"ERRO FATAL NA THREAD DO BOT: {e}", exc_info=True)
-
-# --- REMOVIDO: O CÓDIGO QUE INICIAVA A THREAD FOI MOVIDO PARA gunicorn_config.py ---
 
 # --- END OF FILE app.py ---
