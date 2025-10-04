@@ -9,7 +9,7 @@ import base64
 import io
 import asyncio
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from quart import Quart, request, abort
 from dotenv import load_dotenv
@@ -110,7 +110,7 @@ async def send_access_link_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"[JOB][{payment_id}] Iniciando tarefa para enviar link ao usuário {user_id}.")
     try:
         logger.info(f"[JOB][{payment_id}] Gerando link de convite...")
-        expire_date = datetime.utcnow() + timedelta(hours=1)
+        expire_date = datetime.now(timezone.utc) + timedelta(hours=1)
         invite_link = await bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_date)
 
         logger.info(f"[JOB][{payment_id}] Link gerado. Enviando mensagem para {user_id}...")
