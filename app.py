@@ -11,13 +11,12 @@ import io
 import threading
 import sys
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, request
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-# --- NOVO IMPORT PARA AUMENTAR O TIMEOUT ---
 from telegram.request import HTTPXRequest
 
 # --- CONFIGURAÇÃO DE LOGGING ---
@@ -59,7 +58,6 @@ except (ValueError, TypeError):
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
 global_bot_app = None
 processed_payments = set()
-# --- CORREÇÃO 1: REINTRODUZINDO O THREADING LOCK ---
 payment_processing_lock = threading.Lock()
 
 # --- INICIALIZAÇÃO DO FLASK ---
@@ -124,13 +122,14 @@ async def send_access_link(user_id: int):
         return
     try:
         logger.info(f"Gerando link de convite para o usuário {user_id}...")
-        expire_date = datetime.now() + timedelta(minutes=15)
+        # CORREÇÃO: Link com validade de 1 hora usando UTC
+        expire_date = datetime.now(timezone.utc) + timedelta(hours=1)
         invite_link = await global_bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_date)
         success_message = (
             "🎉 Pagamento confirmado com sucesso!\n\n"
             "Seja bem-vindo(a) ao nosso grupo! Aqui está seu link de acesso exclusivo:\n\n"
             f"{invite_link.invite_link}\n\n"
-            "⚠️ **Atenção:** Este link é de uso único e expira em 15 minutos. Não pode ser compartilhado."
+            "⚠️ **Atenção:** Este link é de uso único e expira em 1 hora. Não pode ser compartilhado."
         )
         await global_bot_app.bot.send_message(chat_id=user_id, text=success_message)
         logger.info(f"✅ Acesso concedido com sucesso para o usuário {user_id}")
@@ -138,12 +137,10 @@ async def send_access_link(user_id: int):
         logger.error(f"Falha ao enviar link de acesso para o usuário {user_id}: {e}", exc_info=True)
 
 def process_approved_payment(payment_id: str):
-    # --- CORREÇÃO 1: USANDO O LOCK PARA GARANTIR EXECUÇÃO ÚNICA ---
     with payment_processing_lock:
         if payment_id in processed_payments:
             logger.info(f"Pagamento {payment_id} já foi processado ou está em processamento por outra thread.")
             return
-        # Adiciona ao set IMEDIATAMENTE dentro do lock para prevenir a condição de corrida
         processed_payments.add(payment_id)
 
     payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
@@ -206,17 +203,20 @@ def run_bot_polling():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        # --- CORREÇÃO 2: AUMENTANDO O TIMEOUT PARA EVITAR ERROS DE REDE ---
-        # Define timeouts mais longos (em segundos)
         request_config = {
-            'connect_timeout': 10.0,
-            'read_timeout': 20.0,
-            'write_timeout': 30.0  # Especialmente importante para uploads (fotos)
+            'connect_timeout': 15.0,
+            'read_timeout': 30.0,
+            'write_timeout': 30.0,
+            'pool_timeout': 10.0
         }
         httpx_request = HTTPXRequest(**request_config)
 
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(httpx_request).build()
-        # --- FIM DA CORREÇÃO 2 ---
+
+        # FORÇA REMOÇÃO DE WEBHOOK ANTES DE INICIAR POLLING
+        logger.info("Removendo qualquer webhook existente...")
+        loop.run_until_complete(application.bot.delete_webhook(drop_pending_updates=True))
+        logger.info("Webhook removido com sucesso!")
 
         global_bot_app = application
         global_bot_app.loop = loop
