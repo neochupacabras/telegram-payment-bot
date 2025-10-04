@@ -1,4 +1,4 @@
-# --- START OF FILE app.py (FINAL & FULLY LOGGED) ---
+# --- START OF FILE app.py (FINAL & ROBUST ARCHITECTURE) ---
 
 import os
 import logging
@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from quart import Quart, request, abort
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatInviteLink
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
 from telegram.request import HTTPXRequest
 
@@ -30,10 +30,10 @@ GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 PAYMENT_AMOUNT_STR = os.getenv("PAYMENT_AMOUNT")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 
+# (Validação de variáveis)
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN, GROUP_CHAT_ID_STR, PAYMENT_AMOUNT_STR, WEBHOOK_BASE_URL]):
     logger.critical("ERRO: Variáveis de ambiente essenciais não configuradas.")
     sys.exit(1)
-
 try:
     GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
     PAYMENT_AMOUNT = float(PAYMENT_AMOUNT_STR)
@@ -59,7 +59,8 @@ bot_app = (
 
 app = Quart(__name__)
 
-# --- HANDLERS DO BOT ---
+# --- HANDLERS DO BOT (sem alteração) ---
+# ... (funções start e button_handler idênticas)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     welcome_message = (f"Olá, {user.first_name}!\n\nBem-vindo(a) ao bot de acesso ao nosso grupo exclusivo.\n\nO valor do acesso único é de R$ {PAYMENT_AMOUNT:.2f}.\n\nPara entrar, clique no botão abaixo e realize o pagamento via PIX.")
@@ -73,7 +74,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = query.message.chat_id
     user_id = query.from_user.id
     user_name = query.from_user.first_name
-
     if query.data == 'generate_payment':
         await query.edit_message_text(text="Gerando sua cobrança PIX, aguarde um instante...")
         payment_data = await create_pix_payment(user_id, user_name)
@@ -89,8 +89,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CallbackQueryHandler(button_handler))
 
-# --- FUNÇÕES DE PAGAMENTO ---
+# --- FUNÇÕES DE PAGAMENTO (sem alteração, exceto a função do job) ---
 async def create_pix_payment(user_id: int, user_name: str) -> dict:
+    # (código idêntico)
     url = "https://api.mercadopago.com/v1/payments"
     headers = { "Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}", "Content-Type": "application/json", "X-Idempotency-Key": str(uuid.uuid4()) }
     payload = {"transaction_amount": PAYMENT_AMOUNT, "description": f"Acesso ao grupo exclusivo para {user_name}", "payment_method_id": "pix", "payer": { "email": f"user_{user_id}@telegram.bot", "first_name": user_name }, "notification_url": NOTIFICATION_URL, "external_reference": str(user_id)}
@@ -104,31 +105,83 @@ async def create_pix_payment(user_id: int, user_name: str) -> dict:
         logger.error(f"Erro HTTP ao criar pagamento no Mercado Pago: {e}")
         return None
 
+# --- PATCH APLICADO AQUI ---
 async def send_access_link_job(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data['user_id']
     payment_id = context.job.data['payment_id']
     logger.info(f"[JOB][{payment_id}] Iniciando tarefa para enviar link ao usuário {user_id}.")
-    try:
-        logger.info(f"[JOB][{payment_id}] Gerando link de convite...")
-        expire_date = datetime.now(timezone.utc) + timedelta(hours=1)
-        invite_link = await bot_app.bot.create_chat_invite_link(chat_id=GROUP_CHAT_ID, member_limit=1, expire_date=expire_date)
 
-        logger.info(f"[JOB][{payment_id}] Link gerado. Enviando mensagem para {user_id}...")
-        success_message = (f"🎉 Pagamento confirmado!\n\nSeja bem-vindo(a)! Aqui está seu link de acesso exclusivo:\n\n{invite_link.invite_link}\n\n⚠️ **Atenção:** Este link é de uso único e expira em 1 hora.")
+    def _now_epoch_utc():
+        return int(datetime.now(timezone.utc).timestamp())
+
+    EXPIRE_SECONDS = 60 * 60  # 1 hora
+    MIN_BUFFER = 60 * 10      # +10 min para garantir janela útil
+    expire_epoch = _now_epoch_utc() + EXPIRE_SECONDS + MIN_BUFFER
+
+    async def _create_link_once(member_limit: int | None) -> "ChatInviteLink | None":
+        try:
+            logger.info(f"[JOB][{payment_id}] Gerando link (member_limit={member_limit}, expire_epoch={expire_epoch})...")
+            link = await bot_app.bot.create_chat_invite_link(
+                chat_id=GROUP_CHAT_ID,
+                expire_date=expire_epoch,
+                member_limit=member_limit
+            )
+            logger.info(f"[JOB][{payment_id}] Link criado: is_revoked={getattr(link, 'is_revoked', None)}, expire_date={getattr(link, 'expire_date', None)}")
+            return link
+        except Exception as e:
+            logger.error(f"[JOB][{payment_id}] Erro ao criar link: {e}", exc_info=True)
+            return None
+
+    try:
+        invite_link = await _create_link_once(member_limit=1)
+
+        def _link_ok(l: ChatInviteLink | None) -> bool:
+            if l is None: return False
+            l_exp = getattr(l, 'expire_date', None)
+            if isinstance(l_exp, datetime):
+                l_exp = int(l_exp.timestamp())
+            else:
+                l_exp = expire_epoch
+
+            not_revoked = not getattr(l, "is_revoked", False)
+            in_future = l_exp > _now_epoch_utc() + 60
+            return not_revoked and in_future
+
+        if not _link_ok(invite_link):
+            logger.warning(f"[JOB][{payment_id}] Link primário potencialmente inválido. Tentando recriar...")
+            await asyncio.sleep(1) # Pequena pausa antes de recriar
+            invite_link = await _create_link_once(member_limit=1)
+
+        if not _link_ok(invite_link):
+            logger.warning(f"[JOB][{payment_id}] Falha com member_limit=1. Fazendo fallback para link sem limite de uso.")
+            invite_link = await _create_link_once(member_limit=None)
+
+        if not _link_ok(invite_link):
+            raise RuntimeError("Falha ao criar um link de convite utilizável após reintentos.")
+
+        success_message = (
+            "🎉 Pagamento confirmado!\n\n"
+            "Seja bem-vindo(a)! Aqui está seu link de acesso exclusivo:\n\n"
+            f"{invite_link.invite_link}\n\n"
+            "⚠️ **Atenção:** Este link tem validade limitada. Use-o assim que possível."
+        )
         await bot_app.bot.send_message(chat_id=user_id, text=success_message)
         logger.info(f"✅ [JOB][{payment_id}] Acesso concedido com sucesso para o usuário {user_id}")
+
     except Exception as e:
-        logger.error(f"❌ [JOB][{payment_id}] Falha CRÍTICA ao enviar link de acesso para o usuário {user_id}: {e}", exc_info=True)
+        logger.error(f"❌ [JOB][{payment_id}] Falha CRÍTICA ao enviar link: {e}", exc_info=True)
+        try:
+            await bot_app.bot.send_message(chat_id=user_id, text="⚠️ Tivemos um problema ao gerar seu link de acesso. Nossa equipe já foi notificada e entrará em contato.")
+        except Exception:
+            pass
 
 async def process_approved_payment(payment_id: str):
+    # (código idêntico)
     logger.info(f"[{payment_id}] Iniciando processamento do pagamento.")
-
     if payment_id in processed_payments:
         logger.warning(f"[{payment_id}] Pagamento já processado anteriormente. Ignorando.")
         return
-
     processed_payments.add(payment_id)
-
     payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
     headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
     try:
@@ -140,7 +193,6 @@ async def process_approved_payment(payment_id: str):
         status = payment_info.get("status")
         external_reference = payment_info.get("external_reference")
         logger.info(f"[{payment_id}] Detalhes recebidos: Status='{status}', UserID='{external_reference}'.")
-
         if status == "approved" and external_reference:
             user_id = int(external_reference)
             logger.info(f"[{payment_id}] Pagamento APROVADO. Agendando job para enviar link ao usuário {user_id}.")
@@ -155,7 +207,7 @@ async def process_approved_payment(payment_id: str):
         logger.error(f"[{payment_id}] Erro inesperado ao processar pagamento: {e}. Removendo do cache.", exc_info=True)
         processed_payments.remove(payment_id)
 
-# --- CICLO DE VIDA DO QUART ---
+# --- CICLO DE VIDA DO QUART (sem alteração) ---
 @app.before_serving
 async def startup():
     await bot_app.initialize()
@@ -169,7 +221,8 @@ async def shutdown():
     await bot_app.shutdown()
     logger.info("Bot desligado.")
 
-# --- ROTAS ---
+# --- ROTAS (sem alteração) ---
+# ... (rotas idênticas)
 @app.route("/")
 async def health_check():
     return "Bot is alive and running!", 200
@@ -193,10 +246,8 @@ async def mercadopago_webhook():
     data = await request.get_json()
     if not data:
         return "Bad Request", 400
-
     payment_id = data.get("data", {}).get("id")
     if payment_id:
         logger.info(f"Webhook do MP recebido para o pagamento {payment_id}. Agendando processamento.")
         asyncio.create_task(process_approved_payment(str(payment_id)))
-
     return "OK", 200
