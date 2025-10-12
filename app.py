@@ -1,4 +1,4 @@
-# --- START OF FILE app.py (FINAL & ROBUST ARCHITECTURE) ---
+# --- START OF FILE app.py (FINAL & ROBUST ARCHITECTURE + SUPABASE) ---
 
 import os
 import logging
@@ -17,12 +17,19 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatInv
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
 from telegram.request import HTTPXRequest
 
+# --- NOVO: Importações do Banco de Dados Supabase ---
+import db_supabase as db
+
 # --- CONFIGURAÇÃO DE LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 # --- CARREGAMENTO E VALIDAÇÃO DE VARIÁVEIS ---
 load_dotenv()
+# Adicione as variáveis do Supabase ao seu arquivo .env
+# SUPABASE_URL="sua_url_aqui"
+# SUPABASE_KEY="sua_chave_anon_aqui"
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN")
 MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN")
@@ -30,9 +37,12 @@ GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 PAYMENT_AMOUNT_STR = os.getenv("PAYMENT_AMOUNT")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 
-# (Validação de variáveis)
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN, GROUP_CHAT_ID_STR, PAYMENT_AMOUNT_STR, WEBHOOK_BASE_URL]):
-    logger.critical("ERRO: Variáveis de ambiente essenciais não configuradas.")
+# Validação (incluindo Supabase)
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN, GROUP_CHAT_ID_STR, PAYMENT_AMOUNT_STR, WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY]):
+    logger.critical("ERRO: Variáveis de ambiente essenciais (incluindo Supabase) não configuradas.")
     sys.exit(1)
 try:
     GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
@@ -44,7 +54,8 @@ except (ValueError, TypeError):
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
 TELEGRAM_WEBHOOK_URL = f"{WEBHOOK_BASE_URL}/webhook/telegram"
 
-processed_payments = set()
+# --- REMOVIDO: O banco de dados agora controla os pagamentos processados ---
+# processed_payments = set()
 
 # --- INICIALIZAÇÃO DO BOT ---
 request_config = {'connect_timeout': 10.0, 'read_timeout': 20.0}
@@ -59,11 +70,14 @@ bot_app = (
 
 app = Quart(__name__)
 
-# --- HANDLERS DO BOT (sem alteração) ---
-# ... (funções start e button_handler idênticas)
+# --- HANDLERS DO BOT (MODIFICADOS) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    welcome_message = (f"Olá, {user.first_name}!\n\nBem-vindo(a) ao bot de acesso ao nosso grupo exclusivo.\n\nO valor do acesso único é de R$ {PAYMENT_AMOUNT:.2f}.\n\nPara entrar, clique no botão abaixo e realize o pagamento via PIX.")
+    tg_user = update.effective_user
+
+    # --- MODIFICADO: Interação com o banco de dados Supabase ---
+    await db.get_or_create_user(tg_user)
+
+    welcome_message = (f"Olá, {tg_user.first_name}!\n\nBem-vindo(a) ao bot de acesso ao nosso grupo exclusivo.\n\nO valor do acesso único é de R$ {PAYMENT_AMOUNT:.2f}.\n\nPara entrar, clique no botão abaixo e realize o pagamento via PIX.")
     keyboard = [[InlineKeyboardButton("✅ Quero Entrar (Pagar com PIX)", callback_data='generate_payment')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
@@ -72,11 +86,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat_id
-    user_id = query.from_user.id
-    user_name = query.from_user.first_name
+    tg_user = query.from_user
+
     if query.data == 'generate_payment':
         await query.edit_message_text(text="Gerando sua cobrança PIX, aguarde um instante...")
-        payment_data = await create_pix_payment(user_id, user_name)
+
+        # --- MODIFICADO: Usa a nova função do Supabase ---
+        payment_data = await create_pix_payment(tg_user)
+
         if payment_data:
             qr_code_image = base64.b64decode(payment_data['qr_code_base64'])
             image_stream = io.BytesIO(qr_code_image)
@@ -89,23 +106,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CallbackQueryHandler(button_handler))
 
-# --- FUNÇÕES DE PAGAMENTO (sem alteração, exceto a função do job) ---
-async def create_pix_payment(user_id: int, user_name: str) -> dict:
-    # (código idêntico)
+# --- FUNÇÕES DE PAGAMENTO (MODIFICADAS) ---
+async def create_pix_payment(tg_user: "telegram.User") -> dict | None:
     url = "https://api.mercadopago.com/v1/payments"
     headers = { "Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}", "Content-Type": "application/json", "X-Idempotency-Key": str(uuid.uuid4()) }
-    payload = {"transaction_amount": PAYMENT_AMOUNT, "description": f"Acesso ao grupo exclusivo para {user_name}", "payment_method_id": "pix", "payer": { "email": f"user_{user_id}@telegram.bot", "first_name": user_name }, "notification_url": NOTIFICATION_URL, "external_reference": str(user_id)}
+    payload = { "transaction_amount": PAYMENT_AMOUNT, "description": f"Acesso ao grupo para {tg_user.first_name}", "payment_method_id": "pix", "payer": { "email": f"user_{tg_user.id}@telegram.bot" }, "notification_url": NOTIFICATION_URL, "external_reference": str(tg_user.id)}
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload, timeout=10)
             response.raise_for_status()
         data = response.json()
+        mp_payment_id = str(data.get('id'))
+
+        # --- MODIFICADO: Salva a transação no Supabase ---
+        db_user = await db.get_or_create_user(tg_user)
+        if db_user and db_user.get('id'):
+            await db.create_pending_transaction(db_user['id'], mp_payment_id, PAYMENT_AMOUNT)
+        else:
+            logger.error(f"Não foi possível obter/criar o usuário do DB para {tg_user.id}. A transação não foi registrada.")
+            # Você pode decidir se quer retornar o erro ao usuário aqui
+
         return { 'qr_code_base64': data['point_of_interaction']['transaction_data']['qr_code_base64'], 'pix_copy_paste': data['point_of_interaction']['transaction_data']['qr_code'] }
     except httpx.HTTPError as e:
         logger.error(f"Erro HTTP ao criar pagamento no Mercado Pago: {e}")
         return None
+    except Exception as e:
+        logger.error(f"Erro inesperado ao criar pagamento ou transação: {e}", exc_info=True)
+        return None
 
-# --- PATCH APLICADO AQUI ---
+# --- send_access_link_job (sem alteração) ---
+# ... (código idêntico) ...
 async def send_access_link_job(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data['user_id']
     payment_id = context.job.data['payment_id']
@@ -175,54 +205,70 @@ async def send_access_link_job(context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+# --- MODIFICADO: Processamento de pagamento agora usa o Supabase ---
 async def process_approved_payment(payment_id: str):
-    # (código idêntico)
-    logger.info(f"[{payment_id}] Iniciando processamento do pagamento.")
-    if payment_id in processed_payments:
-        logger.warning(f"[{payment_id}] Pagamento já processado anteriormente. Ignorando.")
+    logger.info(f"[{payment_id}] Iniciando processamento do webhook.")
+
+    # Verifica o status no nosso banco de dados primeiro
+    current_status = await db.get_transaction_status(payment_id)
+
+    if current_status == 'approved':
+        logger.warning(f"[{payment_id}] Transação já está como 'aprovada' no banco. Ignorando notificação duplicada.")
         return
-    processed_payments.add(payment_id)
+
+    if current_status is None:
+        logger.warning(f"[{payment_id}] Transação não encontrada no banco. Pode ser de outro sistema. Ignorando.")
+        return
+
+    # Consulta os detalhes na API do MP para garantir que está realmente aprovado
     payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
     headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
     try:
-        logger.info(f"[{payment_id}] Consultando detalhes do pagamento na API do MP.")
         async with httpx.AsyncClient() as client:
             response = await client.get(payment_details_url, headers=headers)
             response.raise_for_status()
         payment_info = response.json()
+
         status = payment_info.get("status")
         external_reference = payment_info.get("external_reference")
-        logger.info(f"[{payment_id}] Detalhes recebidos: Status='{status}', UserID='{external_reference}'.")
+        logger.info(f"[{payment_id}] Detalhes do MP: Status='{status}', UserID='{external_reference}'.")
+
         if status == "approved" and external_reference:
             user_id = int(external_reference)
-            logger.info(f"[{payment_id}] Pagamento APROVADO. Agendando job para enviar link ao usuário {user_id}.")
+
+            # Atualiza o status no nosso banco
+            await db.update_transaction_status(payment_id, 'approved')
+
+            # Agenda o job para enviar o link
+            logger.info(f"[{payment_id}] Agendando job para enviar link ao usuário {user_id}.")
             bot_app.job_queue.run_once(send_access_link_job, when=0, data={'user_id': user_id, 'payment_id': payment_id})
         else:
-            logger.warning(f"[{payment_id}] Pagamento não está 'approved'. Removendo do cache para futuras notificações.")
-            processed_payments.remove(payment_id)
-    except httpx.HTTPError as e:
-        logger.error(f"[{payment_id}] Erro HTTP ao consultar pagamento: {e}. Removendo do cache para nova tentativa.")
-        processed_payments.remove(payment_id)
-    except Exception as e:
-        logger.error(f"[{payment_id}] Erro inesperado ao processar pagamento: {e}. Removendo do cache.", exc_info=True)
-        processed_payments.remove(payment_id)
+             logger.warning(f"[{payment_id}] Pagamento não está 'approved' na API do MP (status: {status}). Nenhuma ação tomada.")
+             if status and status != 'pending':
+                 await db.update_transaction_status(payment_id, status) # ex: 'failed', 'cancelled'
 
-# --- CICLO DE VIDA DO QUART (sem alteração) ---
+    except httpx.HTTPError as e:
+        logger.error(f"[{payment_id}] Erro HTTP ao consultar pagamento: {e}.")
+    except Exception as e:
+        logger.error(f"[{payment_id}] Erro inesperado ao processar pagamento: {e}.", exc_info=True)
+
+
+# --- CICLO DE VIDA DO QUART ---
 @app.before_serving
 async def startup():
+    # --- REMOVIDO: init_db() não é mais necessário com Supabase ---
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.bot.set_webhook(url=TELEGRAM_WEBHOOK_URL, secret_token=TELEGRAM_SECRET_TOKEN)
     logger.info("Bot inicializado e webhook registrado.")
 
+# ... (shutdown e rotas sem alteração) ...
 @app.after_serving
 async def shutdown():
     await bot_app.stop()
     await bot_app.shutdown()
     logger.info("Bot desligado.")
 
-# --- ROTAS (sem alteração) ---
-# ... (rotas idênticas)
 @app.route("/")
 async def health_check():
     return "Bot is alive and running!", 200
