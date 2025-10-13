@@ -1,4 +1,4 @@
-# --- START OF FILE db_supabase.py ---
+# --- START OF FILE db_supabase.py (CORRIGIDO) ---
 
 import os
 import asyncio
@@ -23,6 +23,7 @@ else:
     except Exception as e:
         logger.critical(f"Falha ao criar o cliente Supabase: {e}", exc_info=True)
 
+
 async def get_or_create_user(tg_user: TelegramUser) -> dict | None:
     """Busca um usuário no DB pelo ID do Telegram ou o cria se não existir."""
     if not supabase:
@@ -30,43 +31,44 @@ async def get_or_create_user(tg_user: TelegramUser) -> dict | None:
         return None
 
     try:
-        # Verifica se o usuário já existe
+        # MUDANÇA AQUI: Removemos o .single() para evitar o erro quando o usuário não existe.
+        # A busca agora retorna uma lista.
         response = await asyncio.to_thread(
-            lambda: supabase.table('users').select('id, first_name, username').eq('telegram_user_id', tg_user.id).single().execute()
+            lambda: supabase.table('users').select('id, first_name, username').eq('telegram_user_id', tg_user.id).execute()
         )
-        user_data = response.data
 
-        # Se não existe, cria
-        if not user_data:
+        # Se a lista de dados não estiver vazia, o usuário já existe.
+        if response.data:
+            user_data = response.data[0] # Pegamos o primeiro (e único) item da lista
+
+            # Opcional: Atualiza dados se mudaram
+            if user_data.get('first_name') != tg_user.first_name or user_data.get('username') != tg_user.username:
+                await asyncio.to_thread(
+                    lambda: supabase.table('users').update({
+                        "first_name": tg_user.first_name,
+                        "username": tg_user.username
+                    }).eq('telegram_user_id', tg_user.id).execute()
+                )
+                logger.info(f"🔄 [DB] Dados do usuário {tg_user.id} atualizados.")
+
+            return user_data
+
+        # Se a lista está vazia, criamos o usuário.
+        else:
             logger.info(f"➕ [DB] Usuário {tg_user.id} não encontrado. Criando...")
+            # Aqui podemos usar .single() pois temos certeza que a inserção retornará um único item.
             insert_response = await asyncio.to_thread(
                 lambda: supabase.table('users').insert({
                     "telegram_user_id": tg_user.id,
                     "first_name": tg_user.first_name,
                     "username": tg_user.username
-                }).select('id').single().execute()
+                }).select('id, first_name, username').single().execute()
             )
             logger.info(f"✅ [DB] Usuário {tg_user.id} criado com sucesso.")
             return insert_response.data
 
-        # Opcional: Atualiza dados se mudaram
-        if user_data.get('first_name') != tg_user.first_name or user_data.get('username') != tg_user.username:
-            await asyncio.to_thread(
-                lambda: supabase.table('users').update({
-                    "first_name": tg_user.first_name,
-                    "username": tg_user.username
-                }).eq('telegram_user_id', tg_user.id).execute()
-            )
-            logger.info(f"🔄 [DB] Dados do usuário {tg_user.id} atualizados.")
-
-        return user_data
-
     except Exception as e:
-        # O erro "PostgrestError: 'JSON object requested, multiple (or no) rows returned'" é comum quando .single() falha.
-        # Isso acontece se o usuário não existe. O código acima já trata isso.
-        if "multiple (or no) rows returned" not in str(e):
-             logger.error(f"❌ [DB] Erro em get_or_create_user para {tg_user.id}: {e}", exc_info=True)
-        # Se o erro é 'no rows', nosso código já lida com a criação.
+        logger.error(f"❌ [DB] Erro inesperado em get_or_create_user para {tg_user.id}: {e}", exc_info=True)
         return None
 
 
@@ -98,14 +100,15 @@ async def get_transaction_status(mp_payment_id: str) -> str | None:
         return None
 
     try:
+        # MUDANÇA AQUI: Também removemos o .single() daqui.
         response = await asyncio.to_thread(
-            lambda: supabase.table('transactions').select('status').eq('mp_payment_id', mp_payment_id).single().execute()
+            lambda: supabase.table('transactions').select('status').eq('mp_payment_id', mp_payment_id).execute()
         )
         if response.data:
-            return response.data.get('status')
-        return None
+            return response.data[0].get('status')
+        return None # Retorna None se a transação não for encontrada
     except Exception as e:
-        logger.warning(f"⚠️ [DB] Não foi possível obter o status da transação {mp_payment_id}: {e}")
+        logger.error(f"❌ [DB] Erro inesperado em get_transaction_status para {mp_payment_id}: {e}", exc_info=True)
         return None
 
 
