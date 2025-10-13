@@ -1,15 +1,13 @@
-# --- START OF FILE db_supabase.py (CORRIGIDO) ---
+# --- START OF FILE db_supabase.py (FINAL VERSION - TAROT LOGIC APPLIED) ---
 
 import os
 import asyncio
 import logging
 from supabase import create_client, Client
-from telegram import User as TelegramUser # Renomeia para evitar conflito de nome
+from telegram import User as TelegramUser
 
-# Apenas pega o logger. A configuração será feita em app.py
 logger = logging.getLogger(__name__)
 
-# Carrega as credenciais do ambiente
 url: str = os.getenv("SUPABASE_URL")
 key: str = os.getenv("SUPABASE_KEY")
 
@@ -31,16 +29,14 @@ async def get_or_create_user(tg_user: TelegramUser) -> dict | None:
         return None
 
     try:
-        # MUDANÇA AQUI: Removemos o .single() para evitar o erro quando o usuário não existe.
-        # A busca agora retorna uma lista.
+        # 1. Tenta buscar o usuário (lógica do bot de pagamentos)
         response = await asyncio.to_thread(
             lambda: supabase.table('users').select('id, first_name, username').eq('telegram_user_id', tg_user.id).execute()
         )
 
-        # Se a lista de dados não estiver vazia, o usuário já existe.
+        # 2. Se a busca retornar dados, o usuário existe (lógica do bot de pagamentos)
         if response.data:
-            user_data = response.data[0] # Pegamos o primeiro (e único) item da lista
-
+            user_data = response.data[0]
             # Opcional: Atualiza dados se mudaram
             if user_data.get('first_name') != tg_user.first_name or user_data.get('username') != tg_user.username:
                 await asyncio.to_thread(
@@ -50,34 +46,40 @@ async def get_or_create_user(tg_user: TelegramUser) -> dict | None:
                     }).eq('telegram_user_id', tg_user.id).execute()
                 )
                 logger.info(f"🔄 [DB] Dados do usuário {tg_user.id} atualizados.")
-
             return user_data
 
-        # Se a lista está vazia, criamos o usuário.
+        # 3. Se a busca NÃO retornar dados, o usuário precisa ser criado (lógica do bot de Tarô)
         else:
             logger.info(f"➕ [DB] Usuário {tg_user.id} não encontrado. Criando...")
-            # Aqui podemos usar .single() pois temos certeza que a inserção retornará um único item.
-            insert_response = await asyncio.to_thread(
+            # CORREÇÃO APLICADA AQUI: Inserimos primeiro
+            await asyncio.to_thread(
                 lambda: supabase.table('users').insert({
                     "telegram_user_id": tg_user.id,
                     "first_name": tg_user.first_name,
                     "username": tg_user.username
-                }).select('id, first_name, username').single().execute()
+                }).execute()
             )
-            logger.info(f"✅ [DB] Usuário {tg_user.id} criado com sucesso.")
-            return insert_response.data
+            # E DEPOIS buscamos o usuário que acabamos de criar para retornar seus dados
+            logger.info(f"✅ [DB] Usuário {tg_user.id} criado. Buscando novamente para confirmar...")
+            new_user_response = await asyncio.to_thread(
+                lambda: supabase.table('users').select('id, first_name, username').eq('telegram_user_id', tg_user.id).execute()
+            )
+            if new_user_response.data:
+                return new_user_response.data[0]
+            else:
+                logger.error(f"❌ [DB] CRÍTICO: Falha ao buscar o usuário {tg_user.id} imediatamente após a criação.")
+                return None
 
     except Exception as e:
         logger.error(f"❌ [DB] Erro inesperado em get_or_create_user para {tg_user.id}: {e}", exc_info=True)
         return None
 
 
+# As funções abaixo já estavam corretas e não precisam de alteração
 async def create_pending_transaction(db_user_id: int, mp_payment_id: str, amount: float):
-    """Cria um registro de transação com status 'pending'."""
     if not supabase:
         logger.error("❌ [DB] Cliente Supabase não disponível.")
         return
-
     try:
         logger.info(f"💾 [DB] Registrando transação pendente {mp_payment_id} para o usuário ID {db_user_id}...")
         await asyncio.to_thread(
@@ -94,30 +96,25 @@ async def create_pending_transaction(db_user_id: int, mp_payment_id: str, amount
 
 
 async def get_transaction_status(mp_payment_id: str) -> str | None:
-    """Busca o status de uma transação pelo ID de pagamento do Mercado Pago."""
     if not supabase:
         logger.error("❌ [DB] Cliente Supabase não disponível.")
         return None
-
     try:
-        # MUDANÇA AQUI: Também removemos o .single() daqui.
         response = await asyncio.to_thread(
             lambda: supabase.table('transactions').select('status').eq('mp_payment_id', mp_payment_id).execute()
         )
         if response.data:
             return response.data[0].get('status')
-        return None # Retorna None se a transação não for encontrada
+        return None
     except Exception as e:
         logger.error(f"❌ [DB] Erro inesperado em get_transaction_status para {mp_payment_id}: {e}", exc_info=True)
         return None
 
 
 async def update_transaction_status(mp_payment_id: str, new_status: str):
-    """Atualiza o status de uma transação."""
     if not supabase:
         logger.error("❌ [DB] Cliente Supabase não disponível.")
         return
-
     try:
         logger.info(f"🔄 [DB] Atualizando transação {mp_payment_id} para status '{new_status}'...")
         await asyncio.to_thread(
