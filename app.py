@@ -1,4 +1,4 @@
-# --- START OF FILE app.py (FINAL & ROBUST ARCHITECTURE + SUPABASE) ---
+# --- START OF FILE app.py (ARQUITETURA DE ASSINATURAS) ---
 
 import os
 import logging
@@ -13,11 +13,12 @@ from datetime import datetime, timedelta, timezone
 
 from quart import Quart, request, abort
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatInviteLink
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatInviteLink, User as TelegramUser
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, JobQueue
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, Forbidden
 from telegram.request import HTTPXRequest
 
-# --- NOVO: Importações do Banco de Dados Supabase ---
 import db_supabase as db
 
 # --- CONFIGURAÇÃO DE LOGGING ---
@@ -26,91 +27,200 @@ logger = logging.getLogger(__name__)
 
 # --- CARREGAMENTO E VALIDAÇÃO DE VARIÁVEIS ---
 load_dotenv()
-# Adicione as variáveis do Supabase ao seu arquivo .env
-# SUPABASE_URL="sua_url_aqui"
-# SUPABASE_KEY="sua_chave_anon_aqui"
 
+# Variáveis do Telegram e Mercado Pago
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN")
 MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN")
-GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
-PAYMENT_AMOUNT_STR = os.getenv("PAYMENT_AMOUNT")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 
-# Validação (incluindo Supabase)
+# Variáveis do Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN, GROUP_CHAT_ID_STR, PAYMENT_AMOUNT_STR, WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY]):
-    logger.critical("ERRO: Variáveis de ambiente essenciais (incluindo Supabase) não configuradas.")
+# --- NOVO: Variáveis de configuração de produtos e grupos ---
+GROUP_CHAT_IDS_STR = os.getenv("GROUP_CHAT_IDS")
+PRODUCT_ID_LIFETIME = int(os.getenv("PRODUCT_ID_LIFETIME", 0))
+PRODUCT_ID_MONTHLY = int(os.getenv("PRODUCT_ID_MONTHLY", 0))
+
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN, WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY, GROUP_CHAT_IDS_STR, PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY]):
+    logger.critical("ERRO: Variáveis de ambiente essenciais não configuradas.")
     sys.exit(1)
+
 try:
-    GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
-    PAYMENT_AMOUNT = float(PAYMENT_AMOUNT_STR)
+    # Converte a string de IDs em uma lista de inteiros
+    GROUP_CHAT_IDS = [int(gid.strip()) for gid in GROUP_CHAT_IDS_STR.split(',')]
 except (ValueError, TypeError):
-    logger.critical("ERRO CRÍTICO nos valores de ambiente.")
+    logger.critical("ERRO CRÍTICO no formato de GROUP_CHAT_IDS.")
     sys.exit(1)
 
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
 TELEGRAM_WEBHOOK_URL = f"{WEBHOOK_BASE_URL}/webhook/telegram"
-
-# --- REMOVIDO: O banco de dados agora controla os pagamentos processados ---
-# processed_payments = set()
+TIMEZONE_BR = timezone(timedelta(hours=-3))
 
 # --- INICIALIZAÇÃO DO BOT ---
 request_config = {'connect_timeout': 10.0, 'read_timeout': 20.0}
 httpx_request = HTTPXRequest(**request_config)
-bot_app = (
-    Application.builder()
-    .token(TELEGRAM_BOT_TOKEN)
-    .request(httpx_request)
-    .job_queue(JobQueue())
-    .build()
-)
-
+bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(httpx_request).job_queue(JobQueue()).build()
 app = Quart(__name__)
 
-# --- HANDLERS DO BOT (MODIFICADOS) ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    tg_user = update.effective_user
+# --- FUNÇÕES AUXILIARES ---
+def format_date_br(dt: datetime | str | None) -> str:
+    """Formata data para o padrão brasileiro."""
+    if not dt:
+        return "N/A"
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
+    return dt.astimezone(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M')
 
-    # --- MODIFICADO: Interação com o banco de dados Supabase ---
+# --- HANDLERS DE COMANDOS DO USUÁRIO ---
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler do comando /start. Mostra as opções de pagamento."""
+    tg_user = update.effective_user
     await db.get_or_create_user(tg_user)
 
-    welcome_message = (f"Olá, {tg_user.first_name}!\n\nBem-vindo(a) ao bot de acesso ao nosso grupo exclusivo.\n\nO valor do acesso único é de R$ {PAYMENT_AMOUNT:.2f}.\n\nPara entrar, clique no botão abaixo e realize o pagamento via PIX.")
-    keyboard = [[InlineKeyboardButton("✅ Quero Entrar (Pagar com PIX)", callback_data='generate_payment')]]
+    # Busca os preços dos produtos no banco de dados
+    product_monthly = await db.get_product_by_id(PRODUCT_ID_MONTHLY)
+    product_lifetime = await db.get_product_by_id(PRODUCT_ID_LIFETIME)
+
+    if not product_monthly or not product_lifetime:
+        await update.message.reply_text("Desculpe, estamos com um problema em nossos sistemas. Tente novamente mais tarde.")
+        logger.error("Não foi possível carregar os produtos do banco de dados.")
+        return
+
+    welcome_message = f"Olá, {tg_user.first_name}!\n\nBem-vindo(a) ao bot de acesso aos nossos grupos exclusivos.\n\nEscolha seu plano de acesso:"
+    keyboard = [
+        [InlineKeyboardButton(f"✅ Assinatura Mensal (R$ {product_monthly['price']:.2f})", callback_data=f'pay_{PRODUCT_ID_MONTHLY}')],
+        [InlineKeyboardButton(f"💎 Acesso Vitalício (R$ {product_lifetime['price']:.2f})", callback_data=f'pay_{PRODUCT_ID_LIFETIME}')]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler do comando /status. Mostra o status da assinatura."""
+    tg_user = update.effective_user
+    subscription = await db.get_user_active_subscription(tg_user.id)
+
+    if subscription and subscription.get('status') == 'active':
+        product_name = subscription.get('product', {}).get('name', 'N/A')
+        start_date_br = format_date_br(subscription.get('start_date'))
+
+        if subscription.get('end_date'): # Assinatura com data de fim
+            end_date_br = format_date_br(subscription.get('end_date'))
+            message = (
+                "📄 **Status da sua Assinatura**\n\n"
+                f"**Plano:** {product_name}\n"
+                f"**Status:** Ativa ✅\n"
+                f"**Início:** {start_date_br}\n"
+                f"**Vencimento:** {end_date_br}\n\n"
+                "Você tem acesso a todos os nossos grupos. Para renovar, use o comando /renovar."
+            )
+        else: # Acesso vitalício
+            message = (
+                "📄 **Status do seu Acesso**\n\n"
+                f"**Plano:** {product_name}\n"
+                f"**Status:** Ativo ✅\n"
+                f"**Data de Início:** {start_date_br}\n\n"
+                "Seu acesso é vitalício e não expira!"
+            )
+    else:
+        message = "Você não possui uma assinatura ativa no momento. Use o comando /start para ver as opções."
+
+    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+
+async def renew_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler do comando /renovar."""
+    # Este comando basicamente redireciona para o fluxo de pagamento mensal
+    product_monthly = await db.get_product_by_id(PRODUCT_ID_MONTHLY)
+    if not product_monthly:
+        await update.message.reply_text("Erro ao buscar informações de renovação. Tente mais tarde.")
+        return
+
+    message = f"Para renovar sua assinatura mensal por mais 30 dias, o valor é de R$ {product_monthly['price']:.2f}.\n\nClique no botão abaixo para gerar o pagamento PIX."
+    keyboard = [[InlineKeyboardButton(f"Pagar Renovação (R$ {product_monthly['price']:.2f})", callback_data=f'pay_{PRODUCT_ID_MONTHLY}')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message, reply_markup=reply_markup)
+
+
+async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler do comando /suporte."""
+    message = (
+        "Selecione uma opção de suporte:\n\n"
+        "🔗 **Reenviar Links:** Se você já pagou e perdeu os links de acesso.\n"
+        "💰 **Problema no Pagamento:** Se precisa de ajuda com um pagamento."
+    )
+    keyboard = [
+        [InlineKeyboardButton("🔗 Reenviar Links de Acesso", callback_data='support_resend_links')],
+        [InlineKeyboardButton("💰 Ajuda com Pagamento", callback_data='support_payment_help')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+
+
+# --- HANDLER DE BOTÕES (CALLBACKQUERY) ---
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Processa todos os cliques em botões."""
     query = update.callback_query
     await query.answer()
-    chat_id = query.message.chat_id
     tg_user = query.from_user
+    chat_id = query.message.chat_id
+    data = query.data
 
-    if query.data == 'generate_payment':
-        await query.edit_message_text(text="Gerando sua cobrança PIX, aguarde um instante...")
+    # Fluxo de Pagamento
+    if data.startswith('pay_'):
+        product_id = int(data.split('_')[1])
+        product = await db.get_product_by_id(product_id)
+        if not product:
+            await query.edit_message_text(text="Desculpe, este produto não está mais disponível.")
+            return
 
-        # --- MODIFICADO: Usa a nova função do Supabase ---
-        payment_data = await create_pix_payment(tg_user)
+        await query.edit_message_text(text=f"Gerando sua cobrança PIX para o plano '{product['name']}', aguarde...")
+        payment_data = await create_pix_payment(tg_user, product)
 
         if payment_data:
             qr_code_image = base64.b64decode(payment_data['qr_code_base64'])
             image_stream = io.BytesIO(qr_code_image)
             await context.bot.send_photo(chat_id=chat_id, photo=image_stream, caption="Use o QR Code acima ou o código abaixo para pagar.")
-            await context.bot.send_message(chat_id=chat_id, text=f"PIX Copia e Cola:\n\n`{payment_data['pix_copy_paste']}`", parse_mode='MarkdownV2')
-            await context.bot.send_message(chat_id=chat_id, text="Assim que o pagamento for confirmado, você receberá o link de acesso automaticamente!")
+            await context.bot.send_message(chat_id=chat_id, text=f"PIX Copia e Cola:\n\n`{payment_data['pix_copy_paste']}`", parse_mode=ParseMode.MARKDOWN_V2)
+            await context.bot.send_message(chat_id=chat_id, text="Assim que o pagamento for confirmado, você receberá o(s) link(s) de acesso automaticamente!")
         else:
-            await query.edit_message_text(text="Desculpe, ocorreu um erro ao gerar sua cobrança. Tente novamente mais tarde.")
+            await query.edit_message_text(text="Desculpe, ocorreu um erro ao gerar sua cobrança. Tente novamente mais tarde ou use /suporte.")
 
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CallbackQueryHandler(button_handler))
+    # Fluxo de Suporte
+    elif data == 'support_resend_links':
+        await query.edit_message_text("Verificando sua assinatura, um momento...")
+        subscription = await db.get_user_active_subscription(tg_user.id)
+        if subscription and subscription.get('status') == 'active':
+            await query.edit_message_text("Encontramos sua assinatura ativa! Reenviando seus links de acesso...")
+            await send_access_links(tg_user.id, subscription['mp_payment_id']) # Chama a função que envia os links
+        else:
+            await query.edit_message_text("Não encontrei uma assinatura ativa para você. Se você já pagou, use a opção 'Ajuda com Pagamento' ou aguarde alguns minutos pela confirmação.")
 
-# --- FUNÇÕES DE PAGAMENTO (MODIFICADAS) ---
-async def create_pix_payment(tg_user: "telegram.User") -> dict | None:
+    elif data == 'support_payment_help':
+        # Aqui você pode colocar o contato do seu suporte, um link, ou a chave pix manual
+        await query.edit_message_text("Se o pagamento automático falhou, você pode tentar pagar manualmente para a chave PIX: `SUA_CHAVE_PIX_AQUI`\n\n**IMPORTANTE:** Após o pagamento manual, envie o comprovante para @seu_usuario_de_suporte para liberação.", parse_mode=ParseMode.MARKDOWN)
+
+
+# --- LÓGICA DE PAGAMENTO E ACESSO ---
+
+async def create_pix_payment(tg_user: TelegramUser, product: dict) -> dict | None:
+    """Cria uma cobrança PIX no Mercado Pago e uma assinatura pendente no DB."""
     url = "https://api.mercadopago.com/v1/payments"
     headers = { "Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}", "Content-Type": "application/json", "X-Idempotency-Key": str(uuid.uuid4()) }
-    payload = { "transaction_amount": PAYMENT_AMOUNT, "description": f"Acesso ao grupo para {tg_user.first_name}", "payment_method_id": "pix", "payer": { "email": f"user_{tg_user.id}@telegram.bot" }, "notification_url": NOTIFICATION_URL, "external_reference": str(tg_user.id)}
+    # Adicionamos o product_id na referência externa para saber o que foi comprado
+    external_ref = f"user:{tg_user.id};product:{product['id']}"
+    payload = {
+        "transaction_amount": float(product['price']),
+        "description": f"Acesso '{product['name']}' para {tg_user.first_name}",
+        "payment_method_id": "pix",
+        "payer": { "email": f"user_{tg_user.id}@telegram.bot" },
+        "notification_url": NOTIFICATION_URL,
+        "external_reference": external_ref
+    }
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload, timeout=10)
@@ -118,13 +228,12 @@ async def create_pix_payment(tg_user: "telegram.User") -> dict | None:
         data = response.json()
         mp_payment_id = str(data.get('id'))
 
-        # --- MODIFICADO: Salva a transação no Supabase ---
         db_user = await db.get_or_create_user(tg_user)
         if db_user and db_user.get('id'):
-            await db.create_pending_transaction(db_user['id'], mp_payment_id, PAYMENT_AMOUNT)
+            await db.create_pending_subscription(db_user['id'], product['id'], mp_payment_id)
         else:
             logger.error(f"Não foi possível obter/criar o usuário do DB para {tg_user.id}. A transação não foi registrada.")
-            # Você pode decidir se quer retornar o erro ao usuário aqui
+            return None
 
         return { 'qr_code_base64': data['point_of_interaction']['transaction_data']['qr_code_base64'], 'pix_copy_paste': data['point_of_interaction']['transaction_data']['qr_code'] }
     except httpx.HTTPError as e:
@@ -134,135 +243,85 @@ async def create_pix_payment(tg_user: "telegram.User") -> dict | None:
         logger.error(f"Erro inesperado ao criar pagamento ou transação: {e}", exc_info=True)
         return None
 
-# --- send_access_link_job (sem alteração) ---
-# ... (código idêntico) ...
-async def send_access_link_job(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data['user_id']
-    payment_id = context.job.data['payment_id']
-    logger.info(f"[JOB][{payment_id}] Iniciando tarefa para enviar link ao usuário {user_id}.")
 
-    def _now_epoch_utc():
-        return int(datetime.now(timezone.utc).timestamp())
+async def send_access_links(user_id: int, payment_id: str):
+    """Gera e envia os links de acesso para TODOS os grupos configurados."""
+    logger.info(f"[JOB][{payment_id}] Iniciando tarefa para enviar links ao usuário {user_id}.")
 
-    EXPIRE_SECONDS = 60 * 60  # 1 hora
-    MIN_BUFFER = 60 * 10      # +10 min para garantir janela útil
-    expire_epoch = _now_epoch_utc() + EXPIRE_SECONDS + MIN_BUFFER
+    # Busca os IDs de todos os grupos do banco de dados
+    group_ids = await db.get_all_group_ids()
+    if not group_ids:
+        logger.error(f"CRÍTICO: Nenhum grupo encontrado no banco de dados para enviar links ao usuário {user_id}.")
+        await bot_app.bot.send_message(chat_id=user_id, text="⚠️ Tivemos um problema interno para buscar os grupos. Nossa equipe foi notificada.")
+        return
 
-    async def _create_link_once(member_limit: int | None) -> "ChatInviteLink | None":
+    links_text = ""
+    failed_links = 0
+    expire_date = datetime.now(timezone.utc) + timedelta(hours=2) # Link válido por 2 horas
+
+    for chat_id in group_ids:
         try:
-            logger.info(f"[JOB][{payment_id}] Gerando link (member_limit={member_limit}, expire_epoch={expire_epoch})...")
+            # Cria um link de convite de uso único para cada grupo
             link = await bot_app.bot.create_chat_invite_link(
-                chat_id=GROUP_CHAT_ID,
-                expire_date=expire_epoch,
-                member_limit=member_limit
+                chat_id=chat_id,
+                expire_date=expire_date,
+                member_limit=1
             )
-            logger.info(f"[JOB][{payment_id}] Link criado: is_revoked={getattr(link, 'is_revoked', None)}, expire_date={getattr(link, 'expire_date', None)}")
-            return link
+            links_text += f"🔗 Link para Grupo {group_ids.index(chat_id) + 1}: {link.invite_link}\n"
+            await asyncio.sleep(0.2) # Evita rate limiting
         except Exception as e:
-            logger.error(f"[JOB][{payment_id}] Erro ao criar link: {e}", exc_info=True)
-            return None
+            logger.error(f"[JOB][{payment_id}] Erro ao criar link para o grupo {chat_id}: {e}")
+            links_text += f"❌ Falha ao gerar o link para o Grupo {group_ids.index(chat_id) + 1}. Contate o /suporte.\n"
+            failed_links += 1
 
-    try:
-        invite_link = await _create_link_once(member_limit=1)
+    success_message = (
+        "🎉 Pagamento confirmado!\n\n"
+        "Seja bem-vindo(a)! Aqui estão seus links de acesso exclusivos para nossos grupos:\n\n"
+        f"{links_text}\n"
+        "⚠️ **Atenção:** Cada link só pode ser usado **uma vez** e expira em breve. Entre em todos os grupos agora."
+    )
+    await bot_app.bot.send_message(chat_id=user_id, text=success_message)
 
-        def _link_ok(l: ChatInviteLink | None) -> bool:
-            if l is None: return False
-            l_exp = getattr(l, 'expire_date', None)
-            if isinstance(l_exp, datetime):
-                l_exp = int(l_exp.timestamp())
-            else:
-                l_exp = expire_epoch
+    if failed_links == 0:
+        logger.info(f"✅ [JOB][{payment_id}] Todos os {len(group_ids)} links de acesso foram enviados com sucesso para o usuário {user_id}")
+    else:
+         logger.warning(f"⚠️ [JOB][{payment_id}] Foram enviados links para o usuário {user_id}, mas {failed_links} falharam ao ser gerados.")
 
-            not_revoked = not getattr(l, "is_revoked", False)
-            in_future = l_exp > _now_epoch_utc() + 60
-            return not_revoked and in_future
 
-        if not _link_ok(invite_link):
-            logger.warning(f"[JOB][{payment_id}] Link primário potencialmente inválido. Tentando recriar...")
-            await asyncio.sleep(1) # Pequena pausa antes de recriar
-            invite_link = await _create_link_once(member_limit=1)
-
-        if not _link_ok(invite_link):
-            logger.warning(f"[JOB][{payment_id}] Falha com member_limit=1. Fazendo fallback para link sem limite de uso.")
-            invite_link = await _create_link_once(member_limit=None)
-
-        if not _link_ok(invite_link):
-            raise RuntimeError("Falha ao criar um link de convite utilizável após reintentos.")
-
-        success_message = (
-            "🎉 Pagamento confirmado!\n\n"
-            "Seja bem-vindo(a)! Aqui está seu link de acesso exclusivo:\n\n"
-            f"{invite_link.invite_link}\n\n"
-            "⚠️ **Atenção:** Este link tem validade limitada. Use-o assim que possível."
-        )
-        await bot_app.bot.send_message(chat_id=user_id, text=success_message)
-        logger.info(f"✅ [JOB][{payment_id}] Acesso concedido com sucesso para o usuário {user_id}")
-
-    except Exception as e:
-        logger.error(f"❌ [JOB][{payment_id}] Falha CRÍTICA ao enviar link: {e}", exc_info=True)
-        try:
-            await bot_app.bot.send_message(chat_id=user_id, text="⚠️ Tivemos um problema ao gerar seu link de acesso. Nossa equipe já foi notificada e entrará em contato.")
-        except Exception:
-            pass
-
-# --- MODIFICADO: Processamento de pagamento agora usa o Supabase ---
 async def process_approved_payment(payment_id: str):
-    logger.info(f"[{payment_id}] Iniciando processamento do webhook.")
+    """Processa um pagamento aprovado, ativa a assinatura e agenda o envio dos links."""
+    logger.info(f"[{payment_id}] Iniciando processamento de pagamento aprovado.")
 
-    # Verifica o status no nosso banco de dados primeiro
-    current_status = await db.get_transaction_status(payment_id)
+    # Ativa a assinatura no banco de dados. Esta função retorna os dados da assinatura se for bem sucedida.
+    activated_subscription = await db.activate_subscription(payment_id)
 
-    if current_status == 'approved':
-        logger.warning(f"[{payment_id}] Transação já está como 'aprovada' no banco. Ignorando notificação duplicada.")
-        return
+    if activated_subscription:
+        # A função `activate_subscription` já retorna o telegram_user_id
+        telegram_user_id = activated_subscription.get('user', {}).get('telegram_user_id')
 
-    if current_status is None:
-        logger.warning(f"[{payment_id}] Transação não encontrada no banco. Pode ser de outro sistema. Ignorando.")
-        return
-
-    # Consulta os detalhes na API do MP para garantir que está realmente aprovado
-    payment_details_url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
-    headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(payment_details_url, headers=headers)
-            response.raise_for_status()
-        payment_info = response.json()
-
-        status = payment_info.get("status")
-        external_reference = payment_info.get("external_reference")
-        logger.info(f"[{payment_id}] Detalhes do MP: Status='{status}', UserID='{external_reference}'.")
-
-        if status == "approved" and external_reference:
-            user_id = int(external_reference)
-
-            # Atualiza o status no nosso banco
-            await db.update_transaction_status(payment_id, 'approved')
-
-            # Agenda o job para enviar o link
-            logger.info(f"[{payment_id}] Agendando job para enviar link ao usuário {user_id}.")
-            bot_app.job_queue.run_once(send_access_link_job, when=0, data={'user_id': user_id, 'payment_id': payment_id})
+        if telegram_user_id:
+            logger.info(f"[{payment_id}] Assinatura ativada. Agendando envio de links para o usuário {telegram_user_id}.")
+            # Usamos create_task para não bloquear o webhook
+            asyncio.create_task(send_access_links(telegram_user_id, payment_id))
         else:
-             logger.warning(f"[{payment_id}] Pagamento não está 'approved' na API do MP (status: {status}). Nenhuma ação tomada.")
-             if status and status != 'pending':
-                 await db.update_transaction_status(payment_id, status) # ex: 'failed', 'cancelled'
+            logger.error(f"[{payment_id}] CRÍTICO: Assinatura ativada, mas não foi possível encontrar o telegram_user_id associado.")
+    else:
+        logger.warning(f"[{payment_id}] A ativação da assinatura falhou ou já estava ativa. Nenhuma ação de envio de link será tomada.")
 
-    except httpx.HTTPError as e:
-        logger.error(f"[{payment_id}] Erro HTTP ao consultar pagamento: {e}.")
-    except Exception as e:
-        logger.error(f"[{payment_id}] Erro inesperado ao processar pagamento: {e}.", exc_info=True)
+# --- WEBHOOKS E CICLO DE VIDA ---
+bot_app.add_handler(CommandHandler("start", start))
+bot_app.add_handler(CommandHandler("status", status_command))
+bot_app.add_handler(CommandHandler("renovar", renew_command))
+bot_app.add_handler(CommandHandler("suporte", support_command))
+bot_app.add_handler(CallbackQueryHandler(button_handler))
 
-
-# --- CICLO DE VIDA DO QUART ---
 @app.before_serving
 async def startup():
-    # --- REMOVIDO: init_db() não é mais necessário com Supabase ---
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.bot.set_webhook(url=TELEGRAM_WEBHOOK_URL, secret_token=TELEGRAM_SECRET_TOKEN)
-    logger.info("Bot inicializado e webhook registrado.")
+    logger.info("Bot inicializado e webhook registrado com sucesso.")
 
-# ... (shutdown e rotas sem alteração) ...
 @app.after_serving
 async def shutdown():
     await bot_app.stop()
@@ -290,10 +349,26 @@ async def telegram_webhook():
 @app.route("/webhook/mercadopago", methods=['POST'])
 async def mercadopago_webhook():
     data = await request.get_json()
-    if not data:
-        return "Bad Request", 400
-    payment_id = data.get("data", {}).get("id")
-    if payment_id:
-        logger.info(f"Webhook do MP recebido para o pagamento {payment_id}. Agendando processamento.")
-        asyncio.create_task(process_approved_payment(str(payment_id)))
+    logger.info(f"Webhook do MP recebido: {json.dumps(data)}")
+
+    if data and data.get("action") == "payment.updated":
+        payment_id = data.get("data", {}).get("id")
+        if payment_id:
+            # Apenas processamos pagamentos que estão REALMENTE aprovados
+            # Consultamos a API do MP para ter certeza
+            try:
+                async with httpx.AsyncClient() as client:
+                    headers = {"Authorization": f"Bearer {MERCADO_PAGO_ACCESS_TOKEN}"}
+                    response = await client.get(f"https://api.mercadopago.com/v1/payments/{payment_id}", headers=headers)
+                    payment_info = response.json()
+
+                if response.status_code == 200 and payment_info.get("status") == "approved":
+                    logger.info(f"Pagamento {payment_id} confirmado como 'approved'. Agendando processamento.")
+                    asyncio.create_task(process_approved_payment(str(payment_id)))
+                else:
+                    logger.info(f"Notificação para pagamento {payment_id} recebida, mas status não é 'approved' (Status: {payment_info.get('status')}). Ignorando.")
+
+            except Exception as e:
+                logger.error(f"Erro ao verificar status do pagamento {payment_id} na API do MP: {e}")
+
     return "OK", 200
