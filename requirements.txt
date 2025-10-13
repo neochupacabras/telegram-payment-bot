@@ -2,7 +2,8 @@
 
 python-telegram-bot[job-queue]==21.0.1
 supabase==2.4.2
-quart==0.18.4  # <-- MUDANÇA PRINCIPAL AQUI
+quart==0.18.4
 hypercorn==0.16.0
 python-dotenv==1.0.1
 httpx==0.27.0
+Werkzeug<3.0.0  # <-- ADICIONE ESTA LINHA
