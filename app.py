@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from quart import Quart, request, abort
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatInviteLink, User as TelegramUser
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatInviteLink, User as TelegramUser, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, JobQueue
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden
@@ -340,6 +340,20 @@ async def run_scheduler_webhook():
 async def startup():
     await bot_app.initialize()
     await bot_app.start()
+
+    # --- NOVO CÓDIGO AQUI ---
+    # Define a lista de comandos que aparecerão no menu
+    commands = [
+        BotCommand("start", "▶️ Inicia o bot e mostra os planos"),
+        BotCommand("status", "📄 Verifica o status da sua assinatura"),
+        BotCommand("renovar", "🔄 Pagar para renovar assinatura"),
+        BotCommand("suporte", "❓ Ajuda com pagamentos ou links de acesso"),
+    ]
+    # Envia a lista de comandos para o Telegram
+    await bot_app.bot.set_my_commands(commands)
+    logger.info("Comandos do menu registrados com sucesso.")
+    # --- FIM DO NOVO CÓDIGO ---
+
     await bot_app.bot.set_webhook(url=TELEGRAM_WEBHOOK_URL, secret_token=TELEGRAM_SECRET_TOKEN)
     logger.info("Bot inicializado e webhook registrado com sucesso.")
 
