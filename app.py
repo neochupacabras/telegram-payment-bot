@@ -20,6 +20,7 @@ from telegram.error import BadRequest, Forbidden
 from telegram.request import HTTPXRequest
 
 import db_supabase as db
+import scheduler # Importa nosso novo arquivo
 
 # --- CONFIGURAÇÃO DE LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -314,6 +315,26 @@ bot_app.add_handler(CommandHandler("status", status_command))
 bot_app.add_handler(CommandHandler("renovar", renew_command))
 bot_app.add_handler(CommandHandler("suporte", support_command))
 bot_app.add_handler(CallbackQueryHandler(button_handler))
+
+# --- ROTA PARA EXECUTAR O SCHEDULER EXTERNAMENTE ---
+# Pega o token secreto das variáveis de ambiente
+SCHEDULER_SECRET_TOKEN = os.getenv("SCHEDULER_SECRET_TOKEN")
+
+@app.route("/webhook/run-scheduler", methods=['POST'])
+async def run_scheduler_webhook():
+    # Medida de segurança: verifica se um token secreto foi enviado no cabeçalho
+    auth_token = request.headers.get("Authorization")
+    if not SCHEDULER_SECRET_TOKEN or auth_token != f"Bearer {SCHEDULER_SECRET_TOKEN}":
+        logger.warning("Tentativa de acesso não autorizado ao webhook do scheduler.")
+        abort(403) # Forbidden
+
+    logger.info("Webhook do scheduler acionado. Executando tarefas agendadas...")
+    # Executa a função principal do nosso arquivo scheduler.py
+    # Usamos create_task para que a resposta ao webhook seja imediata
+    asyncio.create_task(scheduler.main())
+
+    return "Scheduler tasks triggered.", 200
+
 
 @app.before_serving
 async def startup():
