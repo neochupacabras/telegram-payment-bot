@@ -202,10 +202,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.edit_message_text("Não encontrei uma assinatura ativa para você. Se você já pagou, use a opção 'Ajuda com Pagamento' ou aguarde alguns minutos pela confirmação.")
 
     elif data == 'support_payment_help':
-        # Aqui você pode colocar o contato do seu suporte, um link, ou a chave pix manual
-        await query.edit_message_text("Se o pagamento automático falhou, você pode tentar pagar manualmente para a chave PIX: `SUA_CHAVE_PIX_AQUI`\n\n**IMPORTANTE:** Após o pagamento manual, envie o comprovante para @seu_usuario_de_suporte para liberação.", parse_mode=ParseMode.MARKDOWN)
+        # Escapamos os pontos no nome de usuário e usamos a sintaxe correta do V2
+        # Você deve substituir 'SUA_CHAVE_PIX_AQUI' e '@seu_usuario_de_suporte' pelos seus dados reais.
+        chave_pix = "234caf84-775c-4649-aaf1-ab7d928ef315" # Coloque sua chave aqui
+        usuario_suporte = "@sirigueijo" # Coloque seu @ aqui. Ex: @joao_suporte
 
+        # Precisamos escapar caracteres especiais no nome de usuário para MarkdownV2
+        usuario_suporte_escapado = usuario_suporte.replace("_", "\\_")
 
+        texto = (
+            "Se o pagamento automático falhou, você pode tentar pagar manualmente para a chave PIX:\n\n"
+            f"`{chave_pix}`\n\n" # Código monoespaçado (copia e cola)
+            f"*IMPORTANTE:* Após o pagamento manual, envie o comprovante para {usuario_suporte_escapado} para liberação\\."
+        )
+
+        await query.edit_message_text(
+            text=texto,
+            parse_mode=ParseMode.MARKDOWN_V2 # Usamos a versão V2
+        )
 # --- LÓGICA DE PAGAMENTO E ACESSO ---
 
 async def create_pix_payment(tg_user: TelegramUser, product: dict) -> dict | None:
