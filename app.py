@@ -91,7 +91,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     welcome_message = (
         f"Olá, {tg_user.first_name}!\n\n" \
-        f"*Bem-vindo ao nosso Bot VIP de Conteúdo Adulto +18!* 🔥\n\n" \
+        f"*Bem-vindo ao nosso Bot VIP de Conteúdo Adulto (+18!)* 🔥\n\n" \
         f"Aqui, você acessa o *melhor* do entretenimento erótico premium, com canais exclusivos cheios de vídeos quentes, lives ao vivo e conteúdos que vão te deixar sem fôlego. Tudo administrado de forma *segura* e *discreta* pelo nosso bot – basta pagar uma taxa acessível e entrar no *paraíso do prazer ilimitado*!\n\n" \
         f"*Confira o que te espera nos nossos canais VIP:*\n\n" \
         f"- *SÓ ANAL*: Mergulhe em vídeos *intensos* e dedicados exclusivamente a sexo anal, com cenas *explosivas* que exploram o máximo do desejo!\n" \
@@ -109,7 +109,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton(f"💎 Acesso Vitalício (R$ {product_lifetime['price']:.2f})", callback_data=f'pay_{PRODUCT_ID_LIFETIME}')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(welcome_message, reply_markup=reply_markup)
+    await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
