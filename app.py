@@ -47,8 +47,12 @@ PRODUCT_ID_LIFETIME = int(os.getenv("PRODUCT_ID_LIFETIME", 0))
 PRODUCT_ID_MONTHLY = int(os.getenv("PRODUCT_ID_MONTHLY", 0))
 ADMIN_USER_IDS = os.getenv("ADMIN_USER_IDS")
 
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN, WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY, GROUP_CHAT_IDS_STR, PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY, ADMIN_USER_IDS]):
-    logger.critical("ERRO: Variáveis de ambiente essenciais não configuradas.")
+if not all([
+    TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN,
+    WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY, GROUP_CHAT_IDS_STR,
+    PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY, ADMIN_USER_IDS
+]):
+    logger.critical("ERRO: Uma ou mais variáveis de ambiente essenciais não foram configuradas. Verifique o .env!")
     sys.exit(1)
 
 try:
@@ -305,16 +309,23 @@ SCHEDULER_SECRET_TOKEN = os.getenv("SCHEDULER_SECRET_TOKEN")
 
 @app.route("/webhook/run-scheduler", methods=['POST'])
 async def run_scheduler_webhook():
-    # Medida de segurança: verifica se um token secreto foi enviado no cabeçalho
     auth_token = request.headers.get("Authorization")
     if not SCHEDULER_SECRET_TOKEN or auth_token != f"Bearer {SCHEDULER_SECRET_TOKEN}":
         logger.warning("Tentativa de acesso não autorizado ao webhook do scheduler.")
-        abort(403) # Forbidden
+        abort(403)
 
     logger.info("Webhook do scheduler acionado. Executando tarefas agendadas...")
-    # Executa a função principal do nosso arquivo scheduler.py
-    # Usamos create_task para que a resposta ao webhook seja imediata
-    asyncio.create_task(scheduler.main())
+
+    # -- MODIFICAÇÃO AQUI --
+    # Injetamos as dependências já existentes (bot e cliente supabase)
+    # em vez de chamar scheduler.main()
+    async def run_tasks():
+        logger.info("--- Iniciando verificação do scheduler ---")
+        await scheduler.find_and_process_expiring_subscriptions(db.supabase, bot_app.bot)
+        await scheduler.find_and_process_expired_subscriptions(db.supabase, bot_app.bot)
+        logger.info("--- Verificação do scheduler concluída ---")
+
+    asyncio.create_task(run_tasks())
 
     return "Scheduler tasks triggered.", 200
 

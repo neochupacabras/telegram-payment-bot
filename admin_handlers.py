@@ -52,7 +52,7 @@ def admin_only(func):
             logger.warning(f"Acesso não autorizado ao painel admin pelo usuário {user_id}.")
             if update.message:
                 await update.message.reply_text("Você não tem permissão para usar este comando.")
-            return
+            return ConversationHandler.END # Encerra a conversa se não for admin
         return await func(update, context, *args, **kwargs)
     return wrapped
 
@@ -82,6 +82,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     await show_main_admin_menu(update, context)
     return SELECTING_ACTION
 
+@admin_only
 async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Callback para o botão Voltar."""
     query = update.callback_query
@@ -90,6 +91,7 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return SELECTING_ACTION
 
 # --- FLUXO: CHECAR USUÁRIO ---
+@admin_only
 async def check_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -98,6 +100,7 @@ async def check_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.edit_message_text(text="Por favor, envie o ID numérico ou o @username do usuário que deseja checar.", reply_markup=reply_markup)
     return GETTING_USER_ID_FOR_CHECK
 
+@admin_only
 async def check_user_receive_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     identifier = update.message.text.strip()
     user_data = await db.find_user_by_id_or_username(identifier)
@@ -126,6 +129,7 @@ async def check_user_receive_id(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 # --- FLUXO: CONCEDER ACESSO ---
+@admin_only
 async def grant_access_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -134,6 +138,7 @@ async def grant_access_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(text="Envie o ID numérico ou @username do usuário para conceder acesso.", reply_markup=reply_markup)
     return GETTING_USER_ID_FOR_GRANT
 
+@admin_only
 async def grant_access_receive_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     identifier = update.message.text.strip()
     user_data = await db.find_user_by_id_or_username(identifier)
@@ -159,6 +164,7 @@ async def grant_access_receive_id(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text("Usuário encontrado. Qual plano deseja conceder?", reply_markup=reply_markup)
     return SELECTING_PLAN_FOR_GRANT
 
+@admin_only
 async def grant_access_select_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -181,6 +187,7 @@ async def grant_access_select_plan(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 # --- FLUXO: REVOGAR ACESSO (NOVO) ---
+@admin_only
 async def revoke_access_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -189,6 +196,7 @@ async def revoke_access_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text(text="Envie o ID numérico ou @username do usuário que terá o acesso revogado.", reply_markup=reply_markup)
     return GETTING_USER_ID_FOR_REVOKE
 
+@admin_only
 async def revoke_access_receive_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     identifier = update.message.text.strip()
     user_data = await db.find_user_by_id_or_username(identifier)
@@ -213,6 +221,7 @@ async def revoke_access_receive_id(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text(f"⚠️ ATENÇÃO ⚠️\n\nVocê está prestes a revogar o acesso de {user_data['first_name']} (`{user_data['telegram_user_id']}`) e removê-lo(a) de todos os grupos. Confirma?", reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
     return CONFIRMING_REVOKE
 
+@admin_only
 async def revoke_access_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -237,6 +246,7 @@ async def revoke_access_confirm(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 # --- FLUXO: BROADCAST (NOVO) ---
+@admin_only
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -245,6 +255,7 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.edit_message_text(text="Envie a mensagem que você deseja enviar a todos os usuários com assinatura ativa. Use /cancel para abortar.", reply_markup=reply_markup)
     return GETTING_BROADCAST_MESSAGE
 
+@admin_only
 async def broadcast_receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     # Salva a mensagem para confirmação. Usamos o message_id para poder copiar a formatação.
     context.user_data['broadcast_message'] = update.message
@@ -256,6 +267,7 @@ async def broadcast_receive_message(update: Update, context: ContextTypes.DEFAUL
     await update.message.reply_text("Esta é a mensagem que será enviada. Você confirma o envio?", reply_markup=reply_markup)
     return CONFIRMING_BROADCAST
 
+@admin_only
 async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -265,25 +277,68 @@ async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text("Erro: Mensagem não encontrada. Operação cancelada.")
         return ConversationHandler.END
 
-    await query.edit_message_text("Iniciando envio... Isso pode levar alguns minutos.")
+    await query.edit_message_text("Buscando usuários... O envio começará em breve.")
 
     user_ids = await db.get_all_active_tg_user_ids()
-    sent_count = 0
-    failed_count = 0
+    total_users = len(user_ids)
 
-    for user_id in user_ids:
-        try:
-            await context.bot.copy_message(chat_id=user_id, from_chat_id=message_to_send.chat_id, message_id=message_to_send.message_id)
-            sent_count += 1
-            await asyncio.sleep(0.1) # Evita rate limit
-        except (BadRequest, Forbidden):
-            failed_count += 1
+    await query.edit_message_text(f"Iniciando envio para {total_users} usuários... Isso pode levar tempo.")
 
-    await query.edit_message_text(f"📢 Envio concluído!\n\n- Mensagens enviadas: {sent_count}\n- Falhas (usuários que bloquearam o bot): {failed_count}")
+    # Executa o envio em uma tarefa separada para não bloquear
+    asyncio.create_task(
+        run_broadcast(context, message_to_send, user_ids, query.message.chat_id, query.message.message_id)
+    )
+
     context.user_data.clear()
     return ConversationHandler.END
 
+async def run_broadcast(context: ContextTypes.DEFAULT_TYPE, message_to_send, user_ids, admin_chat_id, admin_message_id):
+    """Função que executa o broadcast de forma segura."""
+    sent_count = 0
+    failed_count = 0
+    total_users = len(user_ids)
+
+    for i, user_id in enumerate(user_ids):
+        try:
+            await context.bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=message_to_send.chat_id,
+                message_id=message_to_send.message_id
+            )
+            sent_count += 1
+            # Regra de envio: 1 mensagem por segundo, com pausa a cada 25.
+            if i % 25 == 0 and i > 0:
+                await context.bot.edit_message_text(
+                    chat_id=admin_chat_id,
+                    message_id=admin_message_id,
+                    text=f"Progresso: {i}/{total_users} enviados... Pausando por 5 segundos para evitar limites."
+                )
+                await asyncio.sleep(5)
+            else:
+                await asyncio.sleep(1) # Pausa de 1s entre mensagens
+
+        except RetryAfter as e:
+            logger.warning(f"Limite de flood atingido. Pausando por {e.retry_after} segundos.")
+            await context.bot.edit_message_text(
+                chat_id=admin_chat_id,
+                message_id=admin_message_id,
+                text=f"Limite da API atingido. Pausando por {e.retry_after}s..."
+            )
+            await asyncio.sleep(e.retry_after)
+            # Tenta reenviar para o mesmo usuário
+            try:
+                await context.bot.copy_message(chat_id=user_id, from_chat_id=message_to_send.chat_id, message_id=message_to_send.message_id)
+                sent_count += 1
+            except (BadRequest, Forbidden):
+                failed_count += 1
+        except (BadRequest, Forbidden):
+            failed_count += 1
+
+    final_text = f"📢 Envio concluído!\n\n- Mensagens enviadas: {sent_count}\n- Falhas (usuários que bloquearam o bot): {failed_count}"
+    await context.bot.edit_message_text(chat_id=admin_chat_id, message_id=admin_message_id, text=final_text)
+
 # --- CANCELAR E CONVERSATION HANDLER ---
+@admin_only
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = "Operação cancelada."
     if update.callback_query:

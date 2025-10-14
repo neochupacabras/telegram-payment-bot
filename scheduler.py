@@ -129,19 +129,3 @@ async def find_and_process_expired_subscriptions(supabase: Client, bot: Bot):
         logger.error(f"Erro CRÍTICO no processo de expiração: {e}", exc_info=True)
 
 
-async def main():
-    if not all([SUPABASE_URL, SUPABASE_KEY, TELEGRAM_BOT_TOKEN]):
-        logger.critical("Variáveis de ambiente essenciais para o scheduler não foram carregadas.")
-        sys.exit(1)
-
-    supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
-    logger.info("--- Iniciando verificação do scheduler ---")
-    await find_and_process_expiring_subscriptions(supabase_client, telegram_bot)
-    await find_and_process_expired_subscriptions(supabase_client, telegram_bot)
-    logger.info("--- Verificação do scheduler concluída ---")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
