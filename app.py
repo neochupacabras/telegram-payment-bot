@@ -203,8 +203,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text("Verificando sua assinatura, um momento...")
         subscription = await db.get_user_active_subscription(tg_user.id)
         if subscription and subscription.get('status') == 'active':
-            await query.edit_message_text("Encontramos sua assinatura ativa! Reenviando seus links de acesso...")
-            await send_access_links(context.bot, tg_user.id, subscription['mp_payment_id']) # Chama a função que envia os links
+            await query.edit_message_text("Encontramos sua assinatura ativa! Verificando seus acessos e reenviando links se necessário...")
+            await send_access_links(context.bot, tg_user.id, subscription['mp_payment_id'], is_support_request=True)
         else:
             await query.edit_message_text("Não encontrei uma assinatura ativa para você. Se você já pagou, use a opção 'Ajuda com Pagamento' ou aguarde alguns minutos pela confirmação.")
 
