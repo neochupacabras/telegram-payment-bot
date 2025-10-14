@@ -43,25 +43,18 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # --- NOVO: Variáveis de configuração de produtos e grupos ---
-GROUP_CHAT_IDS_STR = os.getenv("GROUP_CHAT_IDS")
 PRODUCT_ID_LIFETIME = int(os.getenv("PRODUCT_ID_LIFETIME", 0))
 PRODUCT_ID_MONTHLY = int(os.getenv("PRODUCT_ID_MONTHLY", 0))
 ADMIN_USER_IDS = os.getenv("ADMIN_USER_IDS")
 
 if not all([
     TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN,
-    WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY, GROUP_CHAT_IDS_STR,
-    PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY, ADMIN_USER_IDS, WELCOME_ANIMATION_FILE_ID
+    WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY, PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY,
+    ADMIN_USER_IDS, WELCOME_ANIMATION_FILE_ID
 ]):
     logger.critical("ERRO: Uma ou mais variáveis de ambiente essenciais não foram configuradas. Verifique o .env!")
     sys.exit(1)
 
-try:
-    # Converte a string de IDs em uma lista de inteiros
-    GROUP_CHAT_IDS = [int(gid.strip()) for gid in GROUP_CHAT_IDS_STR.split(',')]
-except (ValueError, TypeError):
-    logger.critical("ERRO CRÍTICO no formato de GROUP_CHAT_IDS.")
-    sys.exit(1)
 
 NOTIFICATION_URL = f"{WEBHOOK_BASE_URL}/webhook/mercadopago"
 TELEGRAM_WEBHOOK_URL = f"{WEBHOOK_BASE_URL}/webhook/telegram"
