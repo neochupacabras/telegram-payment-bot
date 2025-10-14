@@ -36,6 +36,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN")
 MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
+WELCOME_VIDEO_FILE_ID = os.getenv("WELCOME_VIDEO_FILE_ID")
 
 # Variáveis do Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -50,7 +51,7 @@ ADMIN_USER_IDS = os.getenv("ADMIN_USER_IDS")
 if not all([
     TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN,
     WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY, GROUP_CHAT_IDS_STR,
-    PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY, ADMIN_USER_IDS
+    PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY, ADMIN_USER_IDS, WELCOME_VIDEO_FILE_ID
 ]):
     logger.critical("ERRO: Uma ou mais variáveis de ambiente essenciais não foram configuradas. Verifique o .env!")
     sys.exit(1)
@@ -89,16 +90,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Não foi possível carregar os produtos do banco de dados.")
         return
 
-    welcome_message = (
+    welcome_caption = (
         f"Olá, {tg_user.first_name}!\n\n" \
         f"*Bem-vindo ao nosso Bot VIP de Conteúdo Adulto (+18!)* 🔥\n\n" \
         f"Aqui, você acessa o *melhor* do entretenimento erótico premium, com canais exclusivos cheios de vídeos quentes, lives ao vivo e conteúdos que vão te deixar sem fôlego. Tudo administrado de forma *segura* e *discreta* pelo nosso bot – basta pagar uma taxa acessível e entrar no *paraíso do prazer ilimitado*!\n\n" \
         f"*Confira o que te espera nos nossos canais VIP:*\n\n" \
-        f"- *SÓ ANAL*: Mergulhe em vídeos *intensos* e dedicados exclusivamente a sexo anal, com cenas *explosivas* que exploram o máximo do desejo!\n" \
-        f"- *VIP BRASIL*: As modelos brasileiras mais *famosas* e *badaladas* da web, exibindo todo o seu talento em produções nacionais de *alto nível*. Puro fogo tropical!\n" \
-        f"- *LIVES VIP*: Transmissões ao vivo *exclusivas*, russas, ucranianas, brasileiras e mais, de aps como Tango, Super Live e Buzzcast. Não perca nenhum momento!\n" \
-        f"- *COROAS (MILF)*: Mulheres maduras e *irresistíveis*, cheias de experiência e sedução. Conteúdo que prova que a idade só melhora o sabor!\n" \
-        f"- *CORNOS (CUCKOLD)*: Fantasias *ousadas* de cuckold, com histórias e cenas que exploram o prazer da submissão e da dominação. Para quem ama o *proibido*!\n" \
+        f"- *SÓ ANAL*: Mergulhe em vídeos *intensos* e dedicados exclusivamente a sexo anal, com cenas *explosivas* que exploram o máximo do desejo!\n\n" \
+        f"- *VIP BRASIL*: As modelos brasileiras mais *famosas* e *badaladas* da web, exibindo todo o seu talento em produções nacionais de *alto nível*. Puro fogo tropical!\n\n" \
+        f"- *LIVES VIP*: Transmissões ao vivo *exclusivas*, russas, ucranianas, brasileiras e mais, de aps como Tango, Super Live e Buzzcast. Não perca nenhum momento!\n\n" \
+        f"- *COROAS (MILF)*: Mulheres maduras e *irresistíveis*, cheias de experiência e sedução. Conteúdo que prova que a idade só melhora o sabor!\n\n" \
+        f"- *CORNOS (CUCKOLD)*: Fantasias *ousadas* de cuckold, com histórias e cenas que exploram o prazer da submissão e da dominação. Para quem ama o *proibido*!\n\n" \
         f"- *XVIDEOS RED*: Vídeos *exclusivos* da seção premium do XVIDEOS, com qualidade superior e conteúdos que você não encontra em nenhum outro lugar.\n\n" \
         f"Por uma assinatura *única* e *barata*, você ganha acesso imediato a *todos esses canais*, com atualizações diárias. Pagamento fácil via PIX, e *total privacidade* garantida.\n\n" \
         f"*Escolha seu plano de acesso:*"
@@ -109,7 +110,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton(f"💎 Acesso Vitalício (R$ {product_lifetime['price']:.2f})", callback_data=f'pay_{PRODUCT_ID_LIFETIME}')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_video(video=WELCOME_VIDEO_FILE_ID, caption=welcome_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
