@@ -1,4 +1,4 @@
-# --- START OF FILE admin_handlers.py ---
+# --- START OF FILE admin_handlers.py (VERSÃO FINAL COM TODAS AS FUNÇÕES) ---
 
 import os
 import logging
@@ -15,10 +15,11 @@ from telegram.ext import (
     ConversationHandler,
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, Forbidden
 
 import db_supabase as db
-import scheduler  # Para usar a função de expulsão
-from utils import send_access_links, format_date_br # Importa funções do app.py
+import scheduler
+from utils import send_access_links, format_date_br
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(',')] if 
 PRODUCT_ID_LIFETIME = int(os.getenv("PRODUCT_ID_LIFETIME", 0))
 PRODUCT_ID_MONTHLY = int(os.getenv("PRODUCT_ID_MONTHLY", 0))
 
-# --- Estados da ConversationHandler ---
+# --- Estados da ConversationHandler (MAIS ESTADOS ADICIONADOS) ---
 (
     SELECTING_ACTION,
     GETTING_USER_ID_FOR_CHECK,
@@ -42,23 +43,21 @@ PRODUCT_ID_MONTHLY = int(os.getenv("PRODUCT_ID_MONTHLY", 0))
     CONFIRMING_BROADCAST,
 ) = range(8)
 
-# --- DECORATOR DE SEGURANÇA ---
+# --- DECORATOR DE SEGURANÇA (sem alteração) ---
 def admin_only(func):
-    """Restringe o uso de um handler apenas para admins."""
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id
         if user_id not in ADMIN_IDS:
             logger.warning(f"Acesso não autorizado ao painel admin pelo usuário {user_id}.")
-            await update.message.reply_text("Você não tem permissão para usar este comando.")
+            if update.message:
+                await update.message.reply_text("Você não tem permissão para usar este comando.")
             return
         return await func(update, context, *args, **kwargs)
     return wrapped
 
-# --- FUNÇÕES DE ADMIN ---
-
-@admin_only
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+# --- FUNÇÃO AUXILIAR PARA O MENU PRINCIPAL ---
+async def show_main_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False):
     """Mostra o painel de administração principal."""
     keyboard = [
         [InlineKeyboardButton("📊 Checar Status de Usuário", callback_data="admin_check_user")],
@@ -68,50 +67,57 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         [InlineKeyboardButton("✖️ Fechar Painel", callback_data="admin_cancel")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("👑 *Painel de Administração*\n\nSelecione uma ação:", reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    text = "👑 *Painel de Administração*\n\nSelecione uma ação:"
+
+    if is_edit and update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    elif update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+
+# --- HANDLERS PRINCIPAIS ---
+
+@admin_only
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Ponto de entrada para o /admin."""
+    await show_main_admin_menu(update, context)
     return SELECTING_ACTION
 
-async def check_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Pede o ID ou @username do usuário para checar."""
+async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Callback para o botão Voltar."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(text="Por favor, envie o ID numérico ou o @username do usuário que deseja checar.")
+    await show_main_admin_menu(update, context, is_edit=True)
+    return SELECTING_ACTION
+
+# --- FLUXO: CHECAR USUÁRIO ---
+async def check_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("⬅️ Voltar", callback_data="admin_back_to_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text="Por favor, envie o ID numérico ou o @username do usuário que deseja checar.", reply_markup=reply_markup)
     return GETTING_USER_ID_FOR_CHECK
 
 async def check_user_receive_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Recebe o ID/username e mostra as informações."""
     identifier = update.message.text.strip()
     user_data = await db.find_user_by_id_or_username(identifier)
 
     if not user_data:
-        await update.message.reply_text("Usuário não encontrado no banco de dados. Tente novamente ou cancele com /cancel.")
+        await update.message.reply_text("Usuário não encontrado. Tente novamente ou cancele com /cancel.")
         return GETTING_USER_ID_FOR_CHECK
 
-    # Formata a mensagem de status
     first_name = user_data.get('first_name', 'N/A')
     tg_id = user_data.get('telegram_user_id', 'N/A')
     username = f"@{user_data['username']}" if user_data.get('username') else 'N/A'
 
-    message = (
-        f"📊 *Status do Usuário*\n\n"
-        f"👤 *Nome:* {first_name}\n"
-        f"🆔 *Telegram ID:* `{tg_id}`\n"
-        f"✒️ *Username:* {username}\n\n"
-        "-------------------\n"
-    )
-
+    message = (f"📊 *Status do Usuário*\n\n" f"👤 *Nome:* {first_name}\n" f"🆔 *Telegram ID:* `{tg_id}`\n" f"✒️ *Username:* {username}\n\n" "-------------------\n")
     active_sub = next((s for s in user_data.get('subscriptions', []) if s['status'] == 'active'), None)
 
     if active_sub:
         product_name = active_sub.get('product', {}).get('name', 'N/A')
         start_date = format_date_br(active_sub.get('start_date'))
         end_date = "Vitalício" if not active_sub.get('end_date') else format_date_br(active_sub.get('end_date'))
-        message += (
-            f"✅ *Assinatura Ativa*\n"
-            f"📦 *Plano:* {product_name}\n"
-            f"📅 *Início:* {start_date}\n"
-            f"🏁 *Fim:* {end_date}\n"
-        )
+        message += (f"✅ *Assinatura Ativa*\n" f"📦 *Plano:* {product_name}\n" f"📅 *Início:* {start_date}\n" f"🏁 *Fim:* {end_date}\n")
     else:
         message += "❌ *Nenhuma assinatura ativa encontrada.*"
 
@@ -119,11 +125,13 @@ async def check_user_receive_id(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("Para checar outro usuário, envie um novo ID/username. Para voltar ao menu, use /admin.")
     return ConversationHandler.END
 
-
+# --- FLUXO: CONCEDER ACESSO ---
 async def grant_access_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(text="Envie o ID numérico ou @username do usuário para conceder acesso.")
+    keyboard = [[InlineKeyboardButton("⬅️ Voltar", callback_data="admin_back_to_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text="Envie o ID numérico ou @username do usuário para conceder acesso.", reply_markup=reply_markup)
     return GETTING_USER_ID_FOR_GRANT
 
 async def grant_access_receive_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -145,6 +153,7 @@ async def grant_access_receive_id(update: Update, context: ContextTypes.DEFAULT_
     keyboard = [
         [InlineKeyboardButton("Assinatura Mensal", callback_data=f"grant_plan_{PRODUCT_ID_MONTHLY}")],
         [InlineKeyboardButton("Acesso Vitalício", callback_data=f"grant_plan_{PRODUCT_ID_LIFETIME}")],
+        [InlineKeyboardButton("⬅️ Voltar", callback_data="admin_back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Usuário encontrado. Qual plano deseja conceder?", reply_markup=reply_markup)
@@ -154,60 +163,177 @@ async def grant_access_select_plan(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     await query.answer()
     product_id = int(query.data.split('_')[-1])
-
     db_user_id = context.user_data.get('grant_user_id')
     telegram_user_id = context.user_data.get('grant_telegram_user_id')
     admin_id = update.effective_user.id
-
     await query.edit_message_text(text="Processando concessão...")
-
-    # Cria a assinatura manual
     new_sub = await db.create_manual_subscription(db_user_id, product_id, f"manual_grant_by_admin_{admin_id}")
-
     if new_sub:
-        # Envia os links de acesso para o usuário
-        await send_access_links(context.bot, telegram_user_id, new_sub['mp_payment_id'])
+        await send_access_links(context.bot, telegram_user_id, new_sub.get('mp_payment_id', 'manual'))
         await query.edit_message_text(text=f"✅ Acesso concedido com sucesso para o usuário {telegram_user_id}! Os links foram enviados.")
-
-        # Tenta notificar o usuário
         try:
             await context.bot.send_message(telegram_user_id, "Boas notícias! Um administrador concedeu acesso a você. Seus links de convite estão acima.")
         except Exception:
-            pass # Ignora se o usuário bloqueou o bot
+            pass
     else:
         await query.edit_message_text(text="❌ Falha ao conceder acesso. Verifique os logs.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# --- FLUXO: REVOGAR ACESSO (NOVO) ---
+async def revoke_access_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("⬅️ Voltar", callback_data="admin_back_to_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text="Envie o ID numérico ou @username do usuário que terá o acesso revogado.", reply_markup=reply_markup)
+    return GETTING_USER_ID_FOR_REVOKE
+
+async def revoke_access_receive_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    identifier = update.message.text.strip()
+    user_data = await db.find_user_by_id_or_username(identifier)
+
+    if not user_data:
+        await update.message.reply_text("Usuário não encontrado. Tente novamente.")
+        return GETTING_USER_ID_FOR_REVOKE
+
+    active_sub = next((s for s in user_data.get('subscriptions', []) if s['status'] == 'active'), None)
+    if not active_sub:
+        await update.message.reply_text("Este usuário não possui uma assinatura ativa para revogar.")
+        return ConversationHandler.END
+
+    context.user_data['revoke_db_user_id'] = user_data['id']
+    context.user_data['revoke_telegram_user_id'] = user_data['telegram_user_id']
+
+    keyboard = [
+        [InlineKeyboardButton("✅ SIM, REVOGAR AGORA", callback_data="revoke_confirm")],
+        [InlineKeyboardButton("❌ NÃO, CANCELAR", callback_data="admin_back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(f"⚠️ ATENÇÃO ⚠️\n\nVocê está prestes a revogar o acesso de {user_data['first_name']} (`{user_data['telegram_user_id']}`) e removê-lo(a) de todos os grupos. Confirma?", reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    return CONFIRMING_REVOKE
+
+async def revoke_access_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Processando revogação...")
+
+    db_user_id = context.user_data.get('revoke_db_user_id')
+    telegram_user_id = context.user_data.get('revoke_telegram_user_id')
+    admin_id = update.effective_user.id
+
+    success = await db.revoke_subscription(db_user_id, f"revoked_by_admin_{admin_id}")
+    if success:
+        removed_count = await scheduler.kick_user_from_all_groups(telegram_user_id, context.bot)
+        await query.edit_message_text(f"✅ Acesso revogado com sucesso. O usuário foi removido de {removed_count} grupos.")
+        try:
+            await context.bot.send_message(telegram_user_id, "Seu acesso foi revogado por um administrador.")
+        except Exception:
+            pass
+    else:
+        await query.edit_message_text("❌ Falha ao revogar o acesso no banco de dados.")
 
     context.user_data.clear()
     return ConversationHandler.END
 
-# ... (Funções para Revogar e Broadcast podem ser adicionadas aqui no mesmo padrão) ...
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancela a operação atual e limpa os dados de contexto."""
+# --- FLUXO: BROADCAST (NOVO) ---
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    if query:
-        await query.answer()
-        await query.edit_message_text(text="Operação cancelada. Painel fechado.")
-    else:
-        await update.message.reply_text("Operação cancelada.")
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("⬅️ Voltar", callback_data="admin_back_to_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text="Envie a mensagem que você deseja enviar a todos os usuários com assinatura ativa. Use /cancel para abortar.", reply_markup=reply_markup)
+    return GETTING_BROADCAST_MESSAGE
+
+async def broadcast_receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Salva a mensagem para confirmação. Usamos o message_id para poder copiar a formatação.
+    context.user_data['broadcast_message'] = update.message
+    keyboard = [
+        [InlineKeyboardButton("✅ SIM, ENVIAR AGORA", callback_data="broadcast_confirm")],
+        [InlineKeyboardButton("❌ NÃO, CANCELAR", callback_data="admin_back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Esta é a mensagem que será enviada. Você confirma o envio?", reply_markup=reply_markup)
+    return CONFIRMING_BROADCAST
+
+async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    message_to_send = context.user_data.get('broadcast_message')
+
+    if not message_to_send:
+        await query.edit_message_text("Erro: Mensagem não encontrada. Operação cancelada.")
+        return ConversationHandler.END
+
+    await query.edit_message_text("Iniciando envio... Isso pode levar alguns minutos.")
+
+    user_ids = await db.get_all_active_tg_user_ids()
+    sent_count = 0
+    failed_count = 0
+
+    for user_id in user_ids:
+        try:
+            await context.bot.copy_message(chat_id=user_id, from_chat_id=message_to_send.chat_id, message_id=message_to_send.message_id)
+            sent_count += 1
+            await asyncio.sleep(0.1) # Evita rate limit
+        except (BadRequest, Forbidden):
+            failed_count += 1
+
+    await query.edit_message_text(f"📢 Envio concluído!\n\n- Mensagens enviadas: {sent_count}\n- Falhas (usuários que bloquearam o bot): {failed_count}")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# --- CANCELAR E CONVERSATION HANDLER ---
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = "Operação cancelada."
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text=text)
+    elif update.message:
+        await update.message.reply_text(text)
 
     context.user_data.clear()
     return ConversationHandler.END
 
 def get_admin_conversation_handler() -> ConversationHandler:
-    """Cria e retorna o ConversationHandler para o painel de admin."""
     return ConversationHandler(
         entry_points=[CommandHandler("admin", admin_panel)],
         states={
             SELECTING_ACTION: [
                 CallbackQueryHandler(check_user_start, pattern="^admin_check_user$"),
                 CallbackQueryHandler(grant_access_start, pattern="^admin_grant_access$"),
-                # Adicionar handlers para revoke e broadcast aqui
+                CallbackQueryHandler(revoke_access_start, pattern="^admin_revoke_access$"),
+                CallbackQueryHandler(broadcast_start, pattern="^admin_broadcast$"),
                 CallbackQueryHandler(cancel, pattern="^admin_cancel$"),
             ],
-            GETTING_USER_ID_FOR_CHECK: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_user_receive_id)],
-            GETTING_USER_ID_FOR_GRANT: [MessageHandler(filters.TEXT & ~filters.COMMAND, grant_access_receive_id)],
-            SELECTING_PLAN_FOR_GRANT: [CallbackQueryHandler(grant_access_select_plan, pattern="^grant_plan_")],
+            GETTING_USER_ID_FOR_CHECK: [
+                CallbackQueryHandler(back_to_main_menu, pattern="^admin_back_to_menu$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, check_user_receive_id)
+            ],
+            GETTING_USER_ID_FOR_GRANT: [
+                CallbackQueryHandler(back_to_main_menu, pattern="^admin_back_to_menu$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, grant_access_receive_id)
+            ],
+            SELECTING_PLAN_FOR_GRANT: [
+                CallbackQueryHandler(grant_access_select_plan, pattern="^grant_plan_"),
+                CallbackQueryHandler(back_to_main_menu, pattern="^admin_back_to_menu$")
+            ],
+            GETTING_USER_ID_FOR_REVOKE: [
+                CallbackQueryHandler(back_to_main_menu, pattern="^admin_back_to_menu$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, revoke_access_receive_id)
+            ],
+            CONFIRMING_REVOKE: [
+                CallbackQueryHandler(revoke_access_confirm, pattern="^revoke_confirm$"),
+                CallbackQueryHandler(back_to_main_menu, pattern="^admin_back_to_menu$")
+            ],
+            GETTING_BROADCAST_MESSAGE: [
+                CallbackQueryHandler(back_to_main_menu, pattern="^admin_back_to_menu$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_receive_message)
+            ],
+            CONFIRMING_BROADCAST: [
+                CallbackQueryHandler(broadcast_confirm, pattern="^broadcast_confirm$"),
+                CallbackQueryHandler(back_to_main_menu, pattern="^admin_back_to_menu$")
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("admin", admin_panel)],
         per_user=True,
