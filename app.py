@@ -89,7 +89,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Não foi possível carregar os produtos do banco de dados.")
         return
 
-    welcome_message = f"Olá, {tg_user.first_name}!\n\n" \
+    welcome_message = (
+                 f"Olá, {tg_user.first_name}!\n\n" \
                  f"*Bem-vindo ao nosso Bot VIP de Conteúdo Adulto +18!* 🔥\n\n" \
                  f"Aqui, você acessa o *melhor* do entretenimento erótico premium, com canais exclusivos cheios de vídeos quentes, lives ao vivo e conteúdos que vão te deixar sem fôlego. Tudo administrado de forma *segura* e *discreta* pelo nosso bot – basta pagar uma taxa acessível e entrar no *paraíso do prazer ilimitado*!\n\n" \
                  f"*Confira o que te espera nos nossos canais VIP:*\n\n" \
@@ -101,6 +102,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                  f"- *XVIDEOS RED*: Vídeos *exclusivos* da seção premium do XVIDEOS, com qualidade superior e conteúdos que você não encontra em nenhum outro lugar.\n\n" \
                  f"Por uma assinatura *única* e *barata*, você ganha acesso imediato a *todos esses canais*, com atualizações diárias. Pagamento fácil via PIX, e *total privacidade* garantida.\n\n" \
                  f"*Escolha seu plano de acesso:*"
+    )
 
     keyboard = [
         [InlineKeyboardButton(f"✅ Assinatura Mensal (R$ {product_monthly['price']:.2f})", callback_data=f'pay_{PRODUCT_ID_MONTHLY}')],
