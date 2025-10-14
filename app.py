@@ -36,7 +36,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN")
 MERCADO_PAGO_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
-WELCOME_VIDEO_FILE_ID = os.getenv("WELCOME_VIDEO_FILE_ID")
+WELCOME_ANIMATION_FILE_ID = os.getenv("WELCOME_ANIMATION_FILE_ID")
 
 # Variáveis do Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -51,7 +51,7 @@ ADMIN_USER_IDS = os.getenv("ADMIN_USER_IDS")
 if not all([
     TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN,
     WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY, GROUP_CHAT_IDS_STR,
-    PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY, ADMIN_USER_IDS, WELCOME_VIDEO_FILE_ID
+    PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY, ADMIN_USER_IDS, WELCOME_ANIMATION_FILE_ID
 ]):
     logger.critical("ERRO: Uma ou mais variáveis de ambiente essenciais não foram configuradas. Verifique o .env!")
     sys.exit(1)
@@ -96,6 +96,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Aqui, você acessa o *melhor* do entretenimento erótico premium, com canais exclusivos cheios de vídeos quentes, lives ao vivo e conteúdos que vão te deixar sem fôlego. Tudo administrado de forma *segura* e *discreta* pelo nosso bot – basta pagar uma taxa acessível e entrar no *paraíso do prazer ilimitado*!\n\n"
     )
 
+    await update.message.reply_animation(  # <-- MUDANÇA AQUI
+        animation=WELCOME_ANIMATION_FILE_ID, # <-- MUDANÇA AQUI
+        caption=welcome_caption,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
     follow_up_message = (
         f"*Confira o que te espera nos nossos canais VIP:*\n\n" \
         f"- *SÓ ANAL*: Mergulhe em vídeos *intensos* e dedicados exclusivamente a sexo anal, com cenas *explosivas* que exploram o máximo do desejo!\n\n" \
@@ -106,12 +112,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"- *XVIDEOS RED*: Vídeos *exclusivos* da seção premium do XVIDEOS, com qualidade superior e conteúdos que você não encontra em nenhum outro lugar.\n\n" \
         f"Por uma assinatura *única* e *barata*, você ganha acesso imediato a *todos esses canais*, com atualizações diárias. Pagamento fácil via PIX, e *total privacidade* garantida.\n\n" \
         f"*Escolha seu plano de acesso:*"
-    )
-
-    await update.message.reply_video(
-        video=WELCOME_VIDEO_FILE_ID,
-        caption=welcome_caption,
-        parse_mode=ParseMode.MARKDOWN
     )
 
     keyboard = [
