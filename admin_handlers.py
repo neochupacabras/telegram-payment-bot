@@ -18,7 +18,7 @@ from telegram.constants import ParseMode
 
 import db_supabase as db
 import scheduler  # Para usar a função de expulsão
-from app import send_access_links, format_date_br # Importa funções do app.py
+from utils import send_access_links, format_date_br # Importa funções do app.py
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ async def grant_access_select_plan(update: Update, context: ContextTypes.DEFAULT
 
     if new_sub:
         # Envia os links de acesso para o usuário
-        await send_access_links(telegram_user_id, new_sub['mp_payment_id'])
+        await send_access_links(context.bot, telegram_user_id, new_sub['mp_payment_id'])
         await query.edit_message_text(text=f"✅ Acesso concedido com sucesso para o usuário {telegram_user_id}! Os links foram enviados.")
 
         # Tenta notificar o usuário

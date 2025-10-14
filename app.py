@@ -22,6 +22,7 @@ from telegram.request import HTTPXRequest
 import db_supabase as db
 import scheduler # Importa nosso novo arquivo
 from admin_handlers import get_admin_conversation_handler
+from utils import format_date_br, send_access_links
 
 # --- CONFIGURAÇÃO DE LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -67,14 +68,6 @@ httpx_request = HTTPXRequest(**request_config)
 bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(httpx_request).job_queue(JobQueue()).build()
 app = Quart(__name__)
 
-# --- FUNÇÕES AUXILIARES ---
-def format_date_br(dt: datetime | str | None) -> str:
-    """Formata data para o padrão brasileiro."""
-    if not dt:
-        return "N/A"
-    if isinstance(dt, str):
-        dt = datetime.fromisoformat(dt)
-    return dt.astimezone(TIMEZONE_BR).strftime('%d/%m/%Y às %H:%M')
 
 # --- HANDLERS DE COMANDOS DO USUÁRIO ---
 
@@ -199,7 +192,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         subscription = await db.get_user_active_subscription(tg_user.id)
         if subscription and subscription.get('status') == 'active':
             await query.edit_message_text("Encontramos sua assinatura ativa! Reenviando seus links de acesso...")
-            await send_access_links(tg_user.id, subscription['mp_payment_id']) # Chama a função que envia os links
+            await send_access_links(context.bot, tg_user.id, subscription['mp_payment_id']) # Chama a função que envia os links
         else:
             await query.edit_message_text("Não encontrei uma assinatura ativa para você. Se você já pagou, use a opção 'Ajuda com Pagamento' ou aguarde alguns minutos pela confirmação.")
 
@@ -261,50 +254,6 @@ async def create_pix_payment(tg_user: TelegramUser, product: dict) -> dict | Non
         return None
 
 
-async def send_access_links(user_id: int, payment_id: str):
-    """Gera e envia os links de acesso para TODOS os grupos configurados."""
-    logger.info(f"[JOB][{payment_id}] Iniciando tarefa para enviar links ao usuário {user_id}.")
-
-    # Busca os IDs de todos os grupos do banco de dados
-    group_ids = await db.get_all_group_ids()
-    if not group_ids:
-        logger.error(f"CRÍTICO: Nenhum grupo encontrado no banco de dados para enviar links ao usuário {user_id}.")
-        await bot_app.bot.send_message(chat_id=user_id, text="⚠️ Tivemos um problema interno para buscar os grupos. Nossa equipe foi notificada.")
-        return
-
-    links_text = ""
-    failed_links = 0
-    expire_date = datetime.now(timezone.utc) + timedelta(hours=2) # Link válido por 2 horas
-
-    for chat_id in group_ids:
-        try:
-            # Cria um link de convite de uso único para cada grupo
-            link = await bot_app.bot.create_chat_invite_link(
-                chat_id=chat_id,
-                expire_date=expire_date,
-                member_limit=1
-            )
-            links_text += f"🔗 Link para Grupo {group_ids.index(chat_id) + 1}: {link.invite_link}\n"
-            await asyncio.sleep(0.2) # Evita rate limiting
-        except Exception as e:
-            logger.error(f"[JOB][{payment_id}] Erro ao criar link para o grupo {chat_id}: {e}")
-            links_text += f"❌ Falha ao gerar o link para o Grupo {group_ids.index(chat_id) + 1}. Contate o /suporte.\n"
-            failed_links += 1
-
-    success_message = (
-        "🎉 Pagamento confirmado!\n\n"
-        "Seja bem-vindo(a)! Aqui estão seus links de acesso exclusivos para nossos grupos:\n\n"
-        f"{links_text}\n"
-        "⚠️ **Atenção:** Cada link só pode ser usado **uma vez** e expira em breve. Entre em todos os grupos agora."
-    )
-    await bot_app.bot.send_message(chat_id=user_id, text=success_message)
-
-    if failed_links == 0:
-        logger.info(f"✅ [JOB][{payment_id}] Todos os {len(group_ids)} links de acesso foram enviados com sucesso para o usuário {user_id}")
-    else:
-         logger.warning(f"⚠️ [JOB][{payment_id}] Foram enviados links para o usuário {user_id}, mas {failed_links} falharam ao ser gerados.")
-
-
 async def process_approved_payment(payment_id: str):
     """Processa um pagamento aprovado, ativa a assinatura e agenda o envio dos links."""
     logger.info(f"[{payment_id}] Iniciando processamento de pagamento aprovado.")
@@ -319,7 +268,7 @@ async def process_approved_payment(payment_id: str):
         if telegram_user_id:
             logger.info(f"[{payment_id}] Assinatura ativada. Agendando envio de links para o usuário {telegram_user_id}.")
             # Usamos create_task para não bloquear o webhook
-            asyncio.create_task(send_access_links(telegram_user_id, payment_id))
+            asyncio.create_task(send_access_links(bot_app.bot, telegram_user_id, payment_id))
         else:
             logger.error(f"[{payment_id}] CRÍTICO: Assinatura ativada, mas não foi possível encontrar o telegram_user_id associado.")
     else:
