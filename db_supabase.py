@@ -193,3 +193,96 @@ async def get_all_group_ids() -> list[int]:
     except Exception as e:
         logger.error(f"❌ [DB] Erro ao buscar IDs dos grupos: {e}", exc_info=True)
         return []
+
+
+# --- NOVAS FUNÇÕES DE ADMIN ---
+
+async def find_user_by_id_or_username(identifier: str) -> dict | None:
+    """Busca um usuário pelo seu Telegram ID ou username (@ a ser removido)."""
+    if not supabase: return None
+    try:
+        query = supabase.table('users').select('*, subscriptions(*, product:products(*))')
+        if identifier.isdigit():
+            query = query.eq('telegram_user_id', int(identifier))
+        else:
+            # Remove o '@' se presente
+            username = identifier[1:] if identifier.startswith('@') else identifier
+            query = query.eq('username', username)
+
+        response = await asyncio.to_thread(lambda: query.single().execute())
+        return response.data
+    except Exception as e:
+        if "single result" not in str(e): # Ignora erro comum de não encontrar usuário
+            logger.error(f"[DB] Erro ao buscar usuário por '{identifier}': {e}")
+        return None
+
+async def create_manual_subscription(db_user_id: int, product_id: int, admin_notes: str) -> dict | None:
+    """Cria uma assinatura ativa manualmente por um admin."""
+    if not supabase: return None
+    try:
+        product = await get_product_by_id(product_id)
+        if not product:
+            logger.error(f"[DB] Produto {product_id} não encontrado para concessão manual.")
+            return None
+
+        start_date = datetime.now(TIMEZONE_BR)
+        end_date = None
+        if product.get('duration_days'):
+            end_date = start_date + timedelta(days=product['duration_days'])
+
+        # Cria a assinatura
+        response = await asyncio.to_thread(
+            lambda: supabase.table('subscriptions')
+            .insert({
+                "user_id": db_user_id,
+                "product_id": product_id,
+                "mp_payment_id": admin_notes, # Usamos para registrar que foi manual
+                "status": "active",
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat() if end_date else None
+            }).execute()
+        )
+        logger.info(f"✅ [DB] Assinatura manual criada para o usuário {db_user_id}.")
+        return response.data[0] if response.data else None
+    except Exception as e:
+        logger.error(f"❌ [DB] Erro ao criar assinatura manual para o usuário {db_user_id}: {e}")
+        return None
+
+async def revoke_subscription(db_user_id: int, admin_notes: str) -> bool:
+    """Revoga a assinatura ativa de um usuário."""
+    if not supabase: return False
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table('subscriptions')
+            .update({
+                "status": "revoked_by_admin",
+                "end_date": datetime.now(TIMEZONE_BR).isoformat()
+            })
+            .eq('user_id', db_user_id)
+            .eq('status', 'active')
+            .execute()
+        )
+        logger.info(f"✅ [DB] Assinatura do usuário {db_user_id} revogada pelo admin: {admin_notes}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ [DB] Erro ao revogar assinatura do usuário {db_user_id}: {e}")
+        return False
+
+async def get_all_active_tg_user_ids() -> list[int]:
+    """Retorna uma lista de Telegram User IDs de todos os usuários com assinatura ativa."""
+    if not supabase: return []
+    try:
+        response = await asyncio.to_thread(
+            lambda: supabase.table('subscriptions')
+            .select('user:users(telegram_user_id)')
+            .eq('status', 'active')
+            .execute()
+        )
+        if not response.data:
+            return []
+        # Extrai os IDs da estrutura aninhada e remove duplicatas
+        user_ids = {item['user']['telegram_user_id'] for item in response.data if item.get('user')}
+        return list(user_ids)
+    except Exception as e:
+        logger.error(f"❌ [DB] Erro ao buscar todos os usuários ativos: {e}")
+        return []

@@ -21,6 +21,7 @@ from telegram.request import HTTPXRequest
 
 import db_supabase as db
 import scheduler # Importa nosso novo arquivo
+from admin_handlers import get_admin_conversation_handler
 
 # --- CONFIGURAÇÃO DE LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -43,8 +44,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROUP_CHAT_IDS_STR = os.getenv("GROUP_CHAT_IDS")
 PRODUCT_ID_LIFETIME = int(os.getenv("PRODUCT_ID_LIFETIME", 0))
 PRODUCT_ID_MONTHLY = int(os.getenv("PRODUCT_ID_MONTHLY", 0))
+ADMIN_USER_IDS = os.getenv("ADMIN_USER_IDS")
 
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN, WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY, GROUP_CHAT_IDS_STR, PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY]):
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_SECRET_TOKEN, MERCADO_PAGO_ACCESS_TOKEN, WEBHOOK_BASE_URL, SUPABASE_URL, SUPABASE_KEY, GROUP_CHAT_IDS_STR, PRODUCT_ID_LIFETIME, PRODUCT_ID_MONTHLY, ADMIN_USER_IDS]):
     logger.critical("ERRO: Variáveis de ambiente essenciais não configuradas.")
     sys.exit(1)
 
@@ -329,6 +331,7 @@ bot_app.add_handler(CommandHandler("status", status_command))
 bot_app.add_handler(CommandHandler("renovar", renew_command))
 bot_app.add_handler(CommandHandler("suporte", support_command))
 bot_app.add_handler(CallbackQueryHandler(button_handler))
+bot_app.add_handler(get_admin_conversation_handler())
 
 # --- ROTA PARA EXECUTAR O SCHEDULER EXTERNAMENTE ---
 # Pega o token secreto das variáveis de ambiente
