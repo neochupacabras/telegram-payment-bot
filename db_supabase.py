@@ -110,7 +110,17 @@ async def activate_subscription(mp_payment_id: str) -> dict | None:
 
         if subscription.get('status') == 'active':
             logger.warning(f"⚠️ [DB] Assinatura {subscription['id']} já está ativa. Ignorando.")
-            return subscription # Retorna os dados existentes
+            # --- CORREÇÃO APLICADA AQUI ---
+            # Se já estiver ativa, precisamos buscar os dados do usuário para retornar
+            user_data_response = await asyncio.to_thread(
+                lambda: supabase.table('subscriptions')
+                .select('*, user:users(telegram_user_id)')
+                .eq('mp_payment_id', mp_payment_id)
+                .single()
+                .execute()
+            )
+            return user_data_response.data if user_data_response.data else None
+
 
         # 2. Calcula as datas
         start_date = datetime.now(TIMEZONE_BR)
@@ -124,16 +134,27 @@ async def activate_subscription(mp_payment_id: str) -> dict | None:
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat() if end_date else None
         }
-        update_response = await asyncio.to_thread(
+
+        # --- CORREÇÃO APLICADA AQUI: SEPARAMOS UPDATE DO SELECT ---
+        # 3.1. Primeiro, apenas executamos a atualização.
+        await asyncio.to_thread(
             lambda: supabase.table('subscriptions')
             .update(update_payload)
             .eq('mp_payment_id', mp_payment_id)
+            .execute()
+        )
+
+        # 3.2. Agora, buscamos os dados atualizados em uma nova query.
+        final_data_response = await asyncio.to_thread(
+            lambda: supabase.table('subscriptions')
             .select('*, user:users(telegram_user_id)') # Retorna o tg_user_id
+            .eq('mp_payment_id', mp_payment_id)
+            .single() # Usamos single() pois esperamos apenas um resultado
             .execute()
         )
 
         logger.info(f"✅ [DB] Assinatura {subscription['id']} ativada para o pagamento {mp_payment_id}.")
-        return update_response.data[0] if update_response.data else None
+        return final_data_response.data if final_data_response.data else None
 
     except Exception as e:
         logger.error(f"❌ [DB] Erro ao ativar assinatura {mp_payment_id}: {e}", exc_info=True)
