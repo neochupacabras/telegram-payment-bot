@@ -286,3 +286,15 @@ async def get_all_active_tg_user_ids() -> list[int]:
     except Exception as e:
         logger.error(f"❌ [DB] Erro ao buscar todos os usuários ativos: {e}")
         return []
+
+async def get_all_groups_with_names() -> list[dict]:
+    """Busca os IDs e nomes de todos os grupos cadastrados."""
+    if not supabase: return []
+    try:
+        response = await asyncio.to_thread(
+            lambda: supabase.table('groups').select('telegram_chat_id, name').execute()
+        )
+        return response.data if response.data else []
+    except Exception as e:
+        logger.error(f"❌ [DB] Erro ao buscar grupos com nomes: {e}", exc_info=True)
+        return []
